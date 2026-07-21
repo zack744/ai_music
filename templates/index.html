@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>ai_music · 音乐生成流水线</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+           max-width: 960px; margin: 30px auto; padding: 0 20px; color: #222; }
+    h1 { font-size: 22px; }
+    h2 { margin: 0 0 4px; font-size: 16px; }
+    .panel { border: 1px solid #e2e2e2; border-radius: 8px; padding: 18px; margin-bottom: 18px; }
+    .panel.s2 { border-left: 4px solid #16a34a; }
+    .panel .sub { color: #888; font-size: 12px; margin-bottom: 12px; }
+    label { display: block; margin: 8px 0 4px; font-size: 13px; color: #666; }
+    input[type=text], input[type=number], textarea, select {
+      width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; box-sizing: border-box; }
+    textarea { height: 70px; resize: vertical; }
+    button { background: #2563eb; color: white; border: 0; padding: 8px 16px;
+             border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 6px; }
+    button.s2 { background: #16a34a; }
+    button:disabled { background: #9ca3af; cursor: not-allowed; }
+    button.rec { background: #dc2626; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 4px;
+          overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    audio { width: 100%; margin-top: 8px; }
+    .status { padding: 6px 10px; border-radius: 4px; font-size: 13px;
+              display: inline-block; margin-bottom: 12px; }
+    .status.ok { background: #dcfce7; color: #166534; }
+    .status.err { background: #fee2e2; color: #991b1b; }
+    .step { margin: 8px 0; padding: 8px 10px; background: #f8fafc; border-radius: 4px; font-size: 13px; }
+    .step b { color: #334155; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .row > * { flex: 1 1 auto; }
+    .muted { color: #999; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>🎵 ai_music · 音乐生成流水线</h1>
+  <p class="muted">环境音理解 -> 语音识别 -> LLM 创作歌词/风格 -> MiniMax 生成音乐</p>
+
+  <!-- ============ 流水线 ============ -->
+  <div class="panel s2">
+    <h2>云端理解流水线（DashScope 百炼 + MiniMax Music）</h2>
+    <div class="sub">配置项 PIPELINE_MODE / DASHSCOPE_API_KEY / DS_*_MODEL / PIPELINE_MUSIC_*　|　路由 /api/pipeline/*</div>
+    <div id="status2" class="status">检查后端中...</div>
+
+    <form id="form-pipe" enctype="multipart/form-data">
+      <label>环境音（必填）-- 录制 / 上传 / 选内置素材</label>
+      <div class="row">
+        <button type="button" id="rec-env">● 录音</button>
+        <input type="file" id="env-file" accept="audio/*">
+        <select id="env-sample"><option value="">-- 内置素材 --</option></select>
+      </div>
+      <div id="env-preview" class="muted">未选择环境音</div>
+
+      <label>想说的话 -- 录制语音 / 上传语音 / 直接打字（三选一）</label>
+      <div class="row">
+        <button type="button" id="rec-speech">● 录音</button>
+        <input type="file" id="speech-file" accept="audio/*">
+      </div>
+      <div id="speech-preview" class="muted">未选择语音</div>
+      <textarea id="pipe-text" placeholder="直接输入想说的话（不录语音时填这里），如：今天考试没考好，有点难过。"></textarea>
+
+      <label>生成时长 (秒)</label>
+      <input type="number" id="pipe-duration" value="30" min="5" max="120">
+      <p><button type="submit" class="s2">运行流水线</button></p>
+    </form>
+    <div id="pipe-result"></div>
+    <pre id="out-pipe">（完整 JSON 在这里）</pre>
+    <div id="player-pipe"></div>
+  </div>
+
+<script>
+// ---------- 通用：录音助手 ----------
+function makeRecorder(btnId, previewId, setBlob) {
+  const btn = document.getElementById(btnId);
+  const preview = document.getElementById(previewId);
+  let mediaRecorder, chunks = [], recording = false;
+  btn.addEventListener("click", async () => {
+    if (!recording) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        chunks = [];
+        const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "";
+        mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+        mediaRecorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+        mediaRecorder.onstop = () => {
+          const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
+          setBlob(blob);
+          preview.innerHTML = '<audio controls src="' + URL.createObjectURL(blob) + '"></audio>';
+          stream.getTracks().forEach(t => t.stop());
+        };
+        mediaRecorder.start();
+        recording = true;
+        btn.textContent = "⏹ 停止";
+        btn.classList.add("rec");
+      } catch (err) {
+        alert("无法访问麦克风: " + err);
+      }
+    } else {
+      mediaRecorder.stop();
+      recording = false;
+      btn.textContent = "● 录音";
+      btn.classList.remove("rec");
+    }
+  });
+}
+
+// ---------- 健康检查 ----------
+async function check(url, el) {
+  const r = await fetch(url).then(r => r.json()).catch(e => ({ status: "down", error: String(e) }));
+  if (r.status === "ok") {
+    el.className = "status ok";
+    el.textContent = "✓ 就绪 · " + JSON.stringify(r);
+  } else {
+    el.className = "status err";
+    el.textContent = "✗ 未就绪: " + JSON.stringify(r);
+  }
+}
+check("/api/pipeline/health", document.getElementById("status2"));
+
+// ---------- 内置素材下拉 ----------
+async function loadSamples() {
+  const list = await fetch("/api/samples").then(r => r.json());
+  const sel = document.getElementById("env-sample");
+  for (const s of list) {
+    const o = document.createElement("option");
+    o.value = s.url; o.textContent = s.name;
+    sel.appendChild(o);
+  }
+}
+loadSamples();
+
+// ---------- 流水线状态 ----------
+let envBlob = null, speechBlob = null;
+
+makeRecorder("rec-env", "env-preview", b => { envBlob = b; });
+makeRecorder("rec-speech", "speech-preview", b => { speechBlob = b; });
+
+document.getElementById("env-file").addEventListener("change", e => {
+  envBlob = e.target.files[0] || null;
+  document.getElementById("env-preview").innerHTML = envBlob
+    ? '<audio controls src="' + URL.createObjectURL(envBlob) + '"></audio>' : "未选择环境音";
+});
+document.getElementById("env-sample").addEventListener("change", async e => {
+  if (!e.target.value) return;
+  const r = await fetch(e.target.value);
+  envBlob = await r.blob();
+  document.getElementById("env-preview").innerHTML = '<audio controls src="' + e.target.value + '"></audio>';
+});
+document.getElementById("speech-file").addEventListener("change", e => {
+  speechBlob = e.target.files[0] || null;
+  document.getElementById("speech-preview").innerHTML = speechBlob
+    ? '<audio controls src="' + URL.createObjectURL(speechBlob) + '"></audio>' : "未选择语音";
+});
+
+// ---------- 流水线提交 ----------
+document.getElementById("form-pipe").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const out = document.getElementById("out-pipe");
+  const player = document.getElementById("player-pipe");
+  const result = document.getElementById("pipe-result");
+  out.textContent = "流水线运行中... mock 秒返；real 模式每步可能数秒~数十秒";
+  player.innerHTML = "";
+  result.innerHTML = "";
+
+  if (!envBlob) { alert("请先提供环境音（录制/上传/选素材）"); return; }
+  const userText = document.getElementById("pipe-text").value.trim();
+  if (!speechBlob && !userText) { alert("请提供语音或输入文字"); return; }
+
+  const fd = new FormData();
+  fd.append("duration_sec", document.getElementById("pipe-duration").value);
+  fd.append("env_audio", envBlob, "env_audio." + (envBlob.type.split("/")[1] || "webm"));
+  if (speechBlob) fd.append("speech_audio", speechBlob, "speech_audio." + (speechBlob.type.split("/")[1] || "webm"));
+  if (userText) fd.append("user_text", userText);
+
+  const r = await fetch("/api/generate/pipeline", { method: "POST", body: fd });
+  const j = await r.json();
+  out.textContent = JSON.stringify(j, null, 2);
+  if (j.error) return;
+
+  // 分步骤渲染
+  const s = j.steps || {};
+  const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  let html = "";
+  if (s["1_audio_understanding"])
+    html += '<div class="step"><b>① 环境音理解</b><br>' + esc(s["1_audio_understanding"].scene) + '</div>';
+  if (s["2_asr"])
+    html += '<div class="step"><b>② 语音识别</b> [' + esc(s["2_asr"].source) + ']<br>' + esc(s["2_asr"].text) + '</div>';
+  if (s["3_lyrics_and_style"] && s["3_lyrics_and_style"].result) {
+    const ls = s["3_lyrics_and_style"].result;
+    html += '<div class="step"><b>③ 歌词</b><br><pre style="background:#0f172a">' + esc(ls.lyrics || "") + '</pre>'
+         + '<b>音乐风格</b><br>' + esc(ls.music_style || "") + '</div>';
+  }
+  if (s["4_music_generation"])
+    html += '<div class="step"><b>④ 音乐生成</b> [' + esc(s["4_music_generation"].backend) + '/' + esc(s["4_music_generation"].mode) + ']<br>'
+         + '<b>最终 prompt:</b> ' + esc(s["4_music_generation"].prompt) + '</div>';
+  result.innerHTML = html;
+  if (j.output_url) player.innerHTML = '<audio controls src="' + j.output_url + '"></audio>';
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+; =====================================================================
+; ai_music ESP32 固件 (LilyGO T-Display-S3, ESP32-S3-N16R8)
+; 方案B混合：ESP32 只做 录音 + 上传 + 播放 + 屏幕UI，编排逻辑留在远程 Flask
+; =====================================================================
+
+[platformio]
+default_envs = esp32s3
+
+[env:esp32s3]
+platform        = espressif32
+board           = lilygo-t-display-s3   ; 专用板:16MB Flash + 8MB OPI PSRAM,upload.flash_size=16MB(勿用 esp32-s3-devkitc-1,那板卡 8MB 无 PSRAM 致 bootloader 配置不匹配)
+framework       = arduino
+
+; 16MB quad Flash + 8MB OPI PSRAM (T-Display-S3 = ESP32-S3-N16R8)
+board_build.flash_size            = 16MB
+board_build.arduino.memory_type   = qio_opi
+; 16M Flash: 3MB APP(OTA x2) + 9.9MB FATFS（与 Arduino IDE 板选项一致）
+board_build.partitions            = partitions.csv
+
+monitor_speed   = 115200
+upload_speed    = 921600
+monitor_filters = esp32_exception_decoder
+
+build_flags =
+    -DBOARD_HAS_PSRAM
+    -DARDUINO_USB_CDC_ON_BOOT=1      ; USB CDC On Boot: Enable
+    -DARDUINO_USB_MODE=1             ; USB Mode: Hardware CDC and JTAG
+    -DCORE_DEBUG_LEVEL=3
+    ; 切换屏幕总线驱动：1=硬件 I8080(Arduino_ESP32LCD8, 更快/DMA)
+    ;                  0=软件并行(Arduino_ESP32PAR8Q, LilyGO 官方示例同款)
+    -DUSE_HW_I8080_BUS=0
+
+lib_deps =
+    https://github.com/moononournation/Arduino_GFX.git#v1.4.9   ; ST7789V 并行屏驱动 (git 源，绕过 contabostage 镜像; 1.4.x 兼容 arduino-esp32 2.0.17)
+    earlephilhower/ESP8266Audio @ ^1.9.0   ; MP3 流式播放 (Stage 5)
+    bblanchon/ArduinoJson      @ ^7.0.0    ; JSON 解析 (Stage 4+)

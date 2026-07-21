@@ -1,0 +1,46 @@
+# ===== Secrets (NEVER commit) =====
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.*
+
+# ===== Python =====
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# ===== PlatformIO / ESP32 build =====
+esp32_firmware/.pio/
+.pio/
+esp32_firmware/build_err.txt
+esp32_firmware/build_log.txt
+esp32_firmware/upload_out.txt
+# Vendored upstream LVGL v8.4 source (160MB, re-downloadable).
+# Restore: download https://github.com/lvgl/lvgl/archive/refs/tags/v8.4.0.zip
+# and extract so it lives at esp32_firmware/lib/lvgl-release-v8.4/
+esp32_firmware/lib/lvgl-release-v8.4/
+
+# ===== Runtime outputs / logs =====
+logs/*.log
+logs/*.log.*
+static/uploads/*
+!static/uploads/.gitkeep
+static/outputs/*
+!static/outputs/.gitkeep
+
+# ===== Heavy reference data (regenerable, not source) =====
+.board_ref/
+
+# ===== OS / Editor =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
