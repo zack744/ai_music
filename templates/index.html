@@ -5,11 +5,13 @@
   <title>ai_music · 音乐生成流水线</title>
   <style>
     body { font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif;
-           max-width: 960px; margin: 30px auto; padding: 0 20px; color: #222; }
-    h1 { font-size: 22px; }
+           max-width: 1080px; margin: 24px auto; padding: 0 20px; color: #222; }
+    h1 { font-size: 22px; margin-bottom: 4px; }
     h2 { margin: 0 0 4px; font-size: 16px; }
     .panel { border: 1px solid #e2e2e2; border-radius: 8px; padding: 18px; margin-bottom: 18px; }
     .panel.s2 { border-left: 4px solid #16a34a; }
+    .panel.log { border-left: 4px solid #2563eb; }
+    .panel.hist { border-left: 4px solid #7c3aed; }
     .panel .sub { color: #888; font-size: 12px; margin-bottom: 12px; }
     label { display: block; margin: 8px 0 4px; font-size: 13px; color: #666; }
     input[type=text], input[type=number], textarea, select {
@@ -20,8 +22,17 @@
     button.s2 { background: #16a34a; }
     button:disabled { background: #9ca3af; cursor: not-allowed; }
     button.rec { background: #dc2626; }
+    button.ghost { background: #64748b; }
     pre { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 4px;
           overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    pre#log-view {
+      height: 360px; margin: 0; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      line-height: 1.45; white-space: pre; word-break: normal;
+    }
+    pre#log-view .ln-err { color: #fca5a5; }
+    pre#log-view .ln-warn { color: #fcd34d; }
+    pre#log-view .ln-step { color: #86efac; }
+    pre#log-view .ln-api { color: #93c5fd; }
     audio { width: 100%; margin-top: 8px; }
     .status { padding: 6px 10px; border-radius: 4px; font-size: 13px;
               display: inline-block; margin-bottom: 12px; }
@@ -32,17 +43,95 @@
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
     .row > * { flex: 1 1 auto; }
     .muted { color: #999; font-size: 12px; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    .toolbar .meta { color: #64748b; font-size: 12px; margin-left: auto; }
+    .song-item {
+      margin-bottom: 10px; padding: 10px 12px; background: #f8fafc;
+      border-radius: 6px; border: 1px solid #eef2f7;
+    }
+    .song-item .head { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
+    .song-item .title { font-weight: 600; font-size: 14px; word-break: break-all; flex: 1; }
+    .song-item .meta { color: #64748b; font-size: 12px; margin-top: 2px; }
+    button.del { background: #dc2626; padding: 4px 10px; font-size: 12px; margin: 0; flex-shrink: 0; }
+    button.del:hover { background: #b91c1c; }
+    #hist-list { max-height: 480px; overflow: auto; }
   </style>
 </head>
 <body>
   <h1>🎵 ai_music · 音乐生成流水线</h1>
-  <p class="muted">环境音理解 -> 语音识别 -> LLM 创作歌词/风格 -> MiniMax 生成音乐</p>
+  <p class="muted">环境音理解 → 语音识别 → LLM 创作歌词/风格 → 音乐生成（funmusic / minimax）</p>
 
-  <!-- ============ 流水线 ============ -->
+  <!-- ============ 1. 日志监控 ============ -->
+  <div class="panel log">
+    <h2>流水线日志监控</h2>
+    <div class="sub">仅展示生成过程：ESP32/浏览器上传与请求、各模型输入输出、返回结果、成片下载。不含健康检查/轮询。</div>
+    <div class="toolbar">
+      <button type="button" class="ghost" id="btn-log-refresh">刷新</button>
+      <button type="button" class="del" id="btn-log-clear">清空日志</button>
+      <label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:#334155">
+        <input type="checkbox" id="log-auto" checked> 自动刷新 (3s)
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:#334155">
+        行数
+        <select id="log-lines" style="width:auto;padding:4px 8px">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+        </select>
+      </label>
+      <span class="meta" id="log-meta">加载中...</span>
+    </div>
+    <pre id="log-view">加载日志...</pre>
+  </div>
+
+  <!-- ============ 2. 历史歌曲 ============ -->
+  <div class="panel hist">
+    <h2>历史生成歌曲</h2>
+    <div class="sub">来自 <code>static/outputs/</code>；命名：模型简称-日期时间（如 funmusic-20260723-124633.mp3）</div>
+    <div class="toolbar">
+      <button type="button" class="ghost" onclick="loadHistory()">刷新</button>
+      <span class="meta" id="hist-meta"></span>
+    </div>
+    <div id="hist-list" class="muted">加载中...</div>
+  </div>
+
+  <!-- ============ 3. 上传录音 ============ -->
+  <div class="panel">
+    <h2>上传录音文件</h2>
+    <div class="sub">区分浏览器上传和 ESP32 上传的录音文件</div>
+    <button type="button" class="ghost" onclick="loadUploads()" style="margin-bottom:12px">刷新</button>
+
+    <h2 style="margin-top:16px;color:#2563eb">浏览器上传</h2>
+    <div id="uploads-browser" class="muted">加载中...</div>
+
+    <h2 style="margin-top:16px;color:#16a34a">ESP32 上传</h2>
+    <div id="uploads-esp32" class="muted">加载中...</div>
+  </div>
+
+  <!-- ============ 4. 流水线（最下方） ============ -->
   <div class="panel s2">
-    <h2>云端理解流水线（DashScope 百炼 + MiniMax Music）</h2>
+    <h2>云端理解流水线（DashScope 百炼 + 音乐后端）</h2>
     <div class="sub">配置项 PIPELINE_MODE / DASHSCOPE_API_KEY / DS_*_MODEL / PIPELINE_MUSIC_*　|　路由 /api/pipeline/*</div>
     <div id="status2" class="status">检查后端中...</div>
+
+    <div class="toolbar" style="margin: 8px 0 14px; padding: 10px 12px; background: #f0fdf4; border-radius: 6px; border: 1px solid #bbf7d0;">
+      <label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:#166534;font-weight:600">
+        音乐模型
+        <select id="music-backend" style="width:auto;min-width:180px;padding:6px 10px">
+          <option value="funmusic">Fun-Music（百炼）</option>
+          <option value="minimax">MiniMax Music</option>
+        </select>
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:#166534">
+        <input type="checkbox" id="music-instrumental"> 纯音乐（无人声）
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:#9a3412;font-weight:600"
+             title="开启后理解/ASR/LLM/音乐均用模拟数据，秒返，方便测 ESP32 全流程">
+        <input type="checkbox" id="music-mock"> Mock 模式
+      </label>
+      <button type="button" class="s2" id="btn-music-apply">应用切换</button>
+      <span class="meta" id="music-backend-meta" style="margin-left:0">读取中...</span>
+    </div>
 
     <form id="form-pipe" enctype="multipart/form-data">
       <label>环境音（必填）-- 录制 / 上传 / 选内置素材</label>
@@ -68,19 +157,6 @@
     <div id="pipe-result"></div>
     <pre id="out-pipe">（完整 JSON 在这里）</pre>
     <div id="player-pipe"></div>
-  </div>
-
-  <!-- ============ 上传文件 ============ -->
-  <div class="panel">
-    <h2>上传录音文件</h2>
-    <div class="sub">区分浏览器上传和 ESP32 上传的录音文件</div>
-    <button type="button" onclick="loadUploads()" style="margin-bottom:12px">刷新</button>
-
-    <h2 style="margin-top:16px;color:#2563eb">浏览器上传</h2>
-    <div id="uploads-browser" class="muted">加载中...</div>
-
-    <h2 style="margin-top:16px;color:#16a34a">ESP32 上传</h2>
-    <div id="uploads-esp32" class="muted">加载中...</div>
   </div>
 
 <script>
@@ -119,18 +195,201 @@ function makeRecorder(btnId, previewId, setBlob) {
   });
 }
 
-// ---------- 健康检查 ----------
+function escHtml(t) {
+  return String(t).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+// ---------- 健康检查 + 音乐后端 / mock 切换（仅启动时拉一次，不轮询） ----------
+function applyMusicUi(cfg) {
+  if (!cfg) return;
+  const sel = document.getElementById("music-backend");
+  const instr = document.getElementById("music-instrumental");
+  const mockEl = document.getElementById("music-mock");
+  const meta = document.getElementById("music-backend-meta");
+  if (cfg.backend) sel.value = cfg.backend;
+  if (typeof cfg.is_instrumental === "boolean") instr.checked = cfg.is_instrumental;
+  if (typeof cfg.mock === "boolean") mockEl.checked = cfg.mock;
+  const label = cfg.backend === "minimax" ? "MiniMax" : "Fun-Music";
+  meta.textContent = "当前: " + label
+    + (cfg.mock ? " · MOCK" : " · REAL")
+    + " · pipe=" + (cfg.pipeline_mode || "?")
+    + " · music=" + (cfg.music_mode || "?")
+    + (cfg.model ? " · " + cfg.model : "")
+    + (cfg.is_instrumental ? " · 纯音乐" : " · 有人声");
+}
+
 async function check(url, el) {
   const r = await fetch(url).then(r => r.json()).catch(e => ({ status: "down", error: String(e) }));
   if (r.status === "ok") {
     el.className = "status ok";
-    el.textContent = "✓ 就绪 · " + JSON.stringify(r);
+    el.textContent = "✓ 就绪 · backend=" + (r.backend || r.music_backend || "?")
+      + " · " + (r.mock ? "MOCK" : "REAL")
+      + " · pipe=" + (r.pipeline_mode || r.mode || "?")
+      + " · music=" + (r.music_mode || "?");
+    applyMusicUi(r);
   } else {
     el.className = "status err";
     el.textContent = "✗ 未就绪: " + JSON.stringify(r);
   }
 }
 check("/api/pipeline/health", document.getElementById("status2"));
+
+document.getElementById("btn-music-apply").addEventListener("click", async () => {
+  const backend = document.getElementById("music-backend").value;
+  const is_instrumental = document.getElementById("music-instrumental").checked;
+  const mock = document.getElementById("music-mock").checked;
+  const meta = document.getElementById("music-backend-meta");
+  meta.textContent = "切换中...";
+  try {
+    const r = await fetch("/api/pipeline/music-backend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backend, is_instrumental, mock }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      alert(j.error || "切换失败");
+      meta.textContent = "切换失败";
+      return;
+    }
+    applyMusicUi(j);
+    check("/api/pipeline/health", document.getElementById("status2"));
+    loadLogs(true);
+  } catch (e) {
+    alert("切换失败: " + e);
+    meta.textContent = "切换失败";
+  }
+});
+
+// ---------- 日志监控（内容未变不重绘，避免闪烁） ----------
+let logAutoTimer = null;
+let logStickBottom = true;
+let lastLogSig = "";
+
+function classifyLogLine(line) {
+  if (/ERROR|Traceback|ReadTimeout|失败|502/.test(line)) return "ln-err";
+  if (/WARNING|WARN/.test(line)) return "ln-warn";
+  if (/\[1\/4\]|\[2\/4\]|\[3\/4\]|\[4\/4\]|流水线|收到生成请求|ESP32|成片下载|返回客户端|MOCK|mock|配置已更新/.test(line)) return "ln-step";
+  if (/DashScope|Fun-Music|MiniMax|funmusic|minimax|音频理解|ASR|LLM/.test(line)) return "ln-api";
+  return "";
+}
+
+async function loadLogs(force) {
+  const view = document.getElementById("log-view");
+  const meta = document.getElementById("log-meta");
+  const n = document.getElementById("log-lines").value || "200";
+  const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+  try {
+    const data = await fetch("/api/logs?lines=" + n).then(r => r.json());
+    if (data.error) {
+      view.textContent = "加载失败: " + data.error;
+      return;
+    }
+    const lines = data.lines || [];
+    const sig = (data.mtime || "") + "|" + lines.length + "|" + (lines[lines.length - 1] || "");
+    if (!force && sig === lastLogSig) {
+      meta.textContent = "生成日志 " + lines.length + " 行 · 无更新"
+        + (data.mtime ? " · " + data.mtime : "");
+      return;
+    }
+    lastLogSig = sig;
+    view.innerHTML = lines.length
+      ? lines.map(l => {
+          const cls = classifyLogLine(l);
+          return cls ? '<span class="' + cls + '">' + escHtml(l) + '</span>' : escHtml(l);
+        }).join("\n")
+      : "（暂无生成过程日志）";
+    meta.textContent = "生成日志 " + lines.length + " 行"
+      + (data.filtered != null ? "（过滤后 " + data.filtered + "）" : "")
+      + (data.mtime ? " · 更新 " + data.mtime : "");
+    if (logStickBottom || nearBottom) view.scrollTop = view.scrollHeight;
+  } catch (e) {
+    view.textContent = "加载失败: " + e;
+    meta.textContent = "错误";
+  }
+}
+
+document.getElementById("log-view").addEventListener("scroll", () => {
+  const view = document.getElementById("log-view");
+  logStickBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+});
+document.getElementById("btn-log-refresh").addEventListener("click", () => loadLogs(true));
+document.getElementById("btn-log-clear").addEventListener("click", async () => {
+  if (!confirm("确认清空 pipeline.log？此操作不可恢复。")) return;
+  try {
+    const r = await fetch("/api/logs", { method: "DELETE" });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(j.error || "清空失败"); return; }
+    lastLogSig = "";
+    await loadLogs(true);
+  } catch (e) {
+    alert("清空失败: " + e);
+  }
+});
+document.getElementById("log-lines").addEventListener("change", () => loadLogs(true));
+document.getElementById("log-auto").addEventListener("change", e => {
+  if (logAutoTimer) { clearInterval(logAutoTimer); logAutoTimer = null; }
+  if (e.target.checked) logAutoTimer = setInterval(() => loadLogs(false), 5000);
+});
+loadLogs(true);
+logAutoTimer = setInterval(() => loadLogs(false), 5000);
+
+// ---------- 历史歌曲 ----------
+function fmtSize(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(2) + " MB";
+}
+
+async function deleteHistory(name) {
+  if (!confirm("确认删除歌曲？\n" + name)) return;
+  const r = await fetch("/api/history/" + encodeURIComponent(name), { method: "DELETE" });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(j.error || "删除失败"); return; }
+  lastHistSig = "";
+  loadHistory(true);
+  loadLogs(true);
+}
+
+let lastHistSig = "";
+async function loadHistory(force) {
+  const el = document.getElementById("hist-list");
+  const meta = document.getElementById("hist-meta");
+  // 勿先清空列表：整表重绘会打断正在播放的 audio，造成页面「闪卡」
+  if (!el.dataset.ready) el.textContent = "加载中...";
+  try {
+    const data = await fetch("/api/history").then(r => r.json());
+    const songs = data.songs || [];
+    const sig = songs.map(s => s.name + ":" + s.size).join("|");
+    meta.textContent = songs.length + " 首";
+    if (!force && sig === lastHistSig && el.dataset.ready) return;
+    lastHistSig = sig;
+    el.dataset.ready = "1";
+    if (!songs.length) {
+      el.innerHTML = '<span class="muted">暂无生成歌曲</span>';
+      return;
+    }
+    el.innerHTML = songs.map(s =>
+      '<div class="song-item">'
+      + '<div class="head">'
+      +   '<div class="title">' + escHtml(s.name) + '</div>'
+      +   '<button type="button" class="del" data-name="' + escHtml(s.name) + '">删除</button>'
+      + '</div>'
+      + '<div class="meta">' + escHtml(s.created || "") + " · " + fmtSize(s.size || 0) + '</div>'
+      + '<audio controls preload="none" src="' + escHtml(s.url) + '"></audio>'
+      + '</div>'
+    ).join("");
+    el.querySelectorAll("button.del").forEach(btn => {
+      btn.addEventListener("click", () => deleteHistory(btn.getAttribute("data-name")));
+    });
+  } catch (e) {
+    el.innerHTML = '<span style="color:#991b1b">加载失败: ' + escHtml(String(e)) + '</span>';
+  }
+}
+loadHistory(true);
+setInterval(() => loadHistory(false), 30000);
 
 // ---------- 内置素材下拉 ----------
 async function loadSamples() {
@@ -173,9 +432,10 @@ document.getElementById("form-pipe").addEventListener("submit", async (e) => {
   const out = document.getElementById("out-pipe");
   const player = document.getElementById("player-pipe");
   const result = document.getElementById("pipe-result");
-  out.textContent = "流水线运行中... mock 秒返；real 模式每步可能数秒~数十秒";
+  out.textContent = "流水线运行中... mock 秒返；real 可能数秒~数分钟，请看上方日志";
   player.innerHTML = "";
   result.innerHTML = "";
+  loadLogs(true);
 
   if (!envBlob) { alert("请先提供环境音（录制/上传/选素材）"); return; }
   const userText = document.getElementById("pipe-text").value.trim();
@@ -190,55 +450,99 @@ document.getElementById("form-pipe").addEventListener("submit", async (e) => {
   const r = await fetch("/api/generate/pipeline", { method: "POST", body: fd });
   const j = await r.json();
   out.textContent = JSON.stringify(j, null, 2);
+  lastHistSig = "";
+  lastUpSig = "";
+  loadLogs(true);
+  loadHistory(true);
+  loadUploads(true);
   if (j.error) return;
 
-  // 分步骤渲染
   const s = j.steps || {};
-  const esc = t => String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
   let html = "";
   if (s["1_audio_understanding"])
-    html += '<div class="step"><b>① 环境音理解</b><br>' + esc(s["1_audio_understanding"].scene) + '</div>';
+    html += '<div class="step"><b>① 环境音理解</b> [' + escHtml(s["1_audio_understanding"].model || "") + '] '
+         + (s["1_audio_understanding"].elapsed_sec != null ? s["1_audio_understanding"].elapsed_sec + "s" : "")
+         + '<br>' + escHtml(s["1_audio_understanding"].scene) + '</div>';
   if (s["2_asr"])
-    html += '<div class="step"><b>② 语音识别</b> [' + esc(s["2_asr"].source) + ']<br>' + esc(s["2_asr"].text) + '</div>';
+    html += '<div class="step"><b>② 语音识别</b> [' + escHtml(s["2_asr"].source) + '/' + escHtml(s["2_asr"].model || "-") + ']<br>'
+         + escHtml(s["2_asr"].text) + '</div>';
   if (s["3_lyrics_and_style"] && s["3_lyrics_and_style"].result) {
     const ls = s["3_lyrics_and_style"].result;
-    html += '<div class="step"><b>③ 歌词</b><br><pre style="background:#0f172a">' + esc(ls.lyrics || "") + '</pre>'
-         + '<b>音乐风格</b><br>' + esc(ls.music_style || "") + '</div>';
+    html += '<div class="step"><b>③ 歌词</b><br><pre style="background:#0f172a">' + escHtml(ls.lyrics || "") + '</pre>'
+         + '<b>音乐风格</b><br>' + escHtml(ls.music_style || "") + '</div>';
   }
   if (s["4_music_generation"])
-    html += '<div class="step"><b>④ 音乐生成</b> [' + esc(s["4_music_generation"].backend) + '/' + esc(s["4_music_generation"].mode) + ']<br>'
-         + '<b>最终 prompt:</b> ' + esc(s["4_music_generation"].prompt) + '</div>';
+    html += '<div class="step"><b>④ 音乐生成</b> [' + escHtml(s["4_music_generation"].backend) + '/'
+         + escHtml(s["4_music_generation"].mode) + '] '
+         + (s["4_music_generation"].elapsed_sec != null ? s["4_music_generation"].elapsed_sec + "s" : "")
+         + '<br><b>最终 prompt:</b> ' + escHtml(s["4_music_generation"].prompt) + '</div>';
   result.innerHTML = html;
   if (j.output_url) player.innerHTML = '<audio controls src="' + j.output_url + '"></audio>';
 });
 
 // ---------- 上传文件列表 ----------
+function deletePathFromUrl(url) {
+  // /uploads/xxx.wav -> xxx.wav ; /uploads/esp32/xxx.wav -> esp32/xxx.wav
+  const u = (url || "").replace(/^\/uploads\//, "");
+  return u;
+}
+
+async function deleteUpload(relPath) {
+  if (!confirm("确认删除录音？\n" + relPath)) return;
+  const r = await fetch("/api/uploads/" + relPath.split("/").map(encodeURIComponent).join("/"), {
+    method: "DELETE"
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(j.error || "删除失败"); return; }
+  lastUpSig = "";
+  loadUploads(true);
+  loadLogs(true);
+}
+
 function renderFiles(files) {
   if (!files.length) return '<span class="muted">暂无文件</span>';
   return files.map(f => {
-    const kb = (f.size / 1024).toFixed(1);
-    return '<div style="margin-bottom:10px;padding:8px;background:#f8fafc;border-radius:4px">'
-      + '<b>' + f.name + '</b> <span class="muted">' + f.created + ' · ' + kb + ' KB</span>'
-      + '<audio controls preload="none" src="' + f.url + '" style="margin-top:4px"></audio>'
+    const rel = deletePathFromUrl(f.url);
+    return '<div class="song-item">'
+      + '<div class="head">'
+      +   '<div class="title">' + escHtml(f.name) + '</div>'
+      +   '<button type="button" class="del" data-path="' + escHtml(rel) + '">删除</button>'
+      + '</div>'
+      + '<div class="meta">' + escHtml(f.created || "") + " · " + fmtSize(f.size || 0) + '</div>'
+      + '<audio controls preload="none" src="' + escHtml(f.url) + '"></audio>'
       + '</div>';
   }).join("");
 }
 
-async function loadUploads() {
+function bindDeleteButtons(root) {
+  root.querySelectorAll("button.del").forEach(btn => {
+    btn.addEventListener("click", () => deleteUpload(btn.getAttribute("data-path")));
+  });
+}
+
+let lastUpSig = "";
+async function loadUploads(force) {
   const elB = document.getElementById("uploads-browser");
   const elE = document.getElementById("uploads-esp32");
-  elB.textContent = "加载中..."; elE.textContent = "加载中...";
+  if (!elB.dataset.ready) { elB.textContent = "加载中..."; elE.textContent = "加载中..."; }
   try {
     const data = await fetch("/api/uploads").then(r => r.json());
-    elB.innerHTML = renderFiles(data.browser || []);
-    elE.innerHTML = renderFiles(data.esp32 || []);
-  } catch(e) {
-    elB.innerHTML = '<span style="color:#991b1b">加载失败: ' + e + '</span>';
-    elE.innerHTML = '<span style="color:#991b1b">加载失败: ' + e + '</span>';
+    const b = data.browser || [], e = data.esp32 || [];
+    const sig = b.map(x => x.name + ":" + x.size).join(",") + "#" + e.map(x => x.name + ":" + x.size).join(",");
+    if (!force && sig === lastUpSig && elB.dataset.ready) return;
+    lastUpSig = sig;
+    elB.dataset.ready = "1";
+    elB.innerHTML = renderFiles(b);
+    elE.innerHTML = renderFiles(e);
+    bindDeleteButtons(elB);
+    bindDeleteButtons(elE);
+  } catch(err) {
+    elB.innerHTML = '<span style="color:#991b1b">加载失败: ' + escHtml(String(err)) + '</span>';
+    elE.innerHTML = '<span style="color:#991b1b">加载失败: ' + escHtml(String(err)) + '</span>';
   }
 }
-loadUploads();
-setInterval(loadUploads, 10000);
+loadUploads(true);
+setInterval(() => loadUploads(false), 30000);
 </script>
 </body>
 </html>

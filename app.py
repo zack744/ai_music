@@ -43,6 +43,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ai_music")
 
+
+class _QuietPollFilter(logging.Filter):
+    """过滤页面轮询/健康检查的 werkzeug access log，避免冲掉生成过程日志。"""
+
+    _DROP = (
+        "GET /api/logs",
+        "GET /api/history",
+        "GET /api/uploads",
+        "GET /api/pipeline/health",
+        "GET /api/samples",
+        "GET /favicon.ico",
+        '"GET / HTTP',
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return not any(s in msg for s in self._DROP)
+
+
+logging.getLogger("werkzeug").addFilter(_QuietPollFilter())
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024  # 上传 40MB（可能两路音频）
 
@@ -63,37 +87,136 @@ ds_client = DashScopeClient(
     asr_model=os.getenv("DS_ASR_MODEL", "qwen3-asr-flash"),
     llm_model=os.getenv("DS_LLM_MODEL", "qwen-plus"),
 )
-# 音乐生成后端：根据 PIPELINE_MUSIC_BACKEND 动态构建（minimax / funmusic）
-pipeline_music_backend_name = os.getenv("PIPELINE_MUSIC_BACKEND", "minimax")
-# funmusic 复用百炼 DASHSCOPE_API_KEY；minimax 用 MINIMAX_API_KEY
-if pipeline_music_backend_name.lower().strip() in ("funmusic", "fun-music", "fun_music"):
-    _music_api_key = os.getenv("DASHSCOPE_API_KEY", "")
-    _music_extra = {
-        "model": os.getenv("FUNMUSIC_MODEL", "fun-music-v1"),
-        "gender": os.getenv("FUNMUSIC_GENDER", "female"),
-        "is_instrumental": os.getenv("PIPELINE_MUSIC_IS_INSTRUMENTAL", "false").lower().strip() == "true",
-        "audio_format": os.getenv("FUNMUSIC_FORMAT", "mp3"),
+
+# 音乐后端 / mock 模式可运行时切换（网页切换，无需改 .env / 重启）
+def _env_mode(key: str, default: str = "mock") -> str:
+    v = (os.getenv(key, default) or default).lower().strip()
+    return "real" if v == "real" else "mock"
+
+
+_music_runtime = {
+    "backend": (os.getenv("PIPELINE_MUSIC_BACKEND", "funmusic") or "funmusic").lower().strip(),
+    "is_instrumental": os.getenv("PIPELINE_MUSIC_IS_INSTRUMENTAL", "false").lower().strip() == "true",
+    "pipeline_mode": _env_mode("PIPELINE_MODE", "mock"),
+    "music_mode": _env_mode("PIPELINE_MUSIC_MODE", "mock"),
+}
+if _music_runtime["backend"] in ("fun-music", "fun_music"):
+    _music_runtime["backend"] = "funmusic"
+if _music_runtime["backend"] not in ("funmusic", "minimax"):
+    _music_runtime["backend"] = "funmusic"
+
+
+def _normalize_music_backend(name: str) -> str:
+    n = (name or "").lower().strip()
+    if n in ("funmusic", "fun-music", "fun_music"):
+        return "funmusic"
+    if n == "minimax":
+        return "minimax"
+    raise ValueError("不支持的音乐后端，可选 funmusic / minimax")
+
+
+def _build_music_client(backend: str, is_instrumental: bool, music_mode: str | None = None):
+    """按当前运行时配置构建音乐后端实例。"""
+    mode = music_mode if music_mode is not None else _music_runtime["music_mode"]
+    mode = "real" if mode == "real" else "mock"
+    if backend == "funmusic":
+        return build_music_backend(
+            name="funmusic",
+            api_key=os.getenv("DASHSCOPE_API_KEY", ""),
+            mode=mode,
+            model=os.getenv("FUNMUSIC_MODEL", "fun-music-v1"),
+            gender=os.getenv("FUNMUSIC_GENDER", "female"),
+            is_instrumental=is_instrumental,
+            audio_format=os.getenv("FUNMUSIC_FORMAT", "mp3"),
+        )
+    return build_music_backend(
+        name="minimax",
+        api_key=os.getenv("MINIMAX_API_KEY", ""),
+        mode=mode,
+        is_instrumental=is_instrumental,
+    )
+
+
+def _apply_ds_mode(mode: str) -> str:
+    """设置云端三步 mock/real。real 且无 key 时客户端仍会降级 mock。"""
+    mode = "real" if mode == "real" else "mock"
+    if mode == "real" and ds_client.api_key:
+        ds_client.mode = "real"
+    else:
+        ds_client.mode = "mock"
+        mode = "mock" if mode == "real" and not ds_client.api_key else mode
+    return ds_client.mode
+
+
+def _music_config_payload() -> dict:
+    music = pipeline.music
+    mock_on = (
+        _music_runtime["pipeline_mode"] == "mock"
+        and _music_runtime["music_mode"] == "mock"
+    )
+    return {
+        "backend": _music_runtime["backend"],
+        "is_instrumental": _music_runtime["is_instrumental"],
+        "pipeline_mode": _music_runtime["pipeline_mode"],
+        "music_mode": getattr(music, "mode", _music_runtime["music_mode"]),
+        "mock": mock_on,
+        "model": getattr(music, "model", None),
+        "gender": getattr(music, "gender", None),
+        "options": [
+            {"id": "funmusic", "label": "Fun-Music（百炼）"},
+            {"id": "minimax", "label": "MiniMax Music"},
+        ],
     }
-else:
-    _music_api_key = os.getenv("MINIMAX_API_KEY", "")
-    _music_extra = {
-        "is_instrumental": os.getenv("PIPELINE_MUSIC_IS_INSTRUMENTAL", "false").lower().strip() == "true",
-    }
-pipeline_music = build_music_backend(
-    name=pipeline_music_backend_name,
-    api_key=_music_api_key,
-    mode=os.getenv("PIPELINE_MUSIC_MODE", "mock"),
-    **_music_extra,
-)
+
+
+def apply_music_backend(
+    backend: str,
+    is_instrumental: bool | None = None,
+    mock: bool | None = None,
+) -> dict:
+    """切换音乐后端 / mock，热更新 pipeline（进程内生效，不写 .env）。"""
+    name = _normalize_music_backend(backend)
+    instr = _music_runtime["is_instrumental"] if is_instrumental is None else bool(is_instrumental)
+
+    if mock is True:
+        pipe_mode = music_mode = "mock"
+    elif mock is False:
+        pipe_mode = music_mode = "real"
+    else:
+        pipe_mode = _music_runtime["pipeline_mode"]
+        music_mode = _music_runtime["music_mode"]
+
+    actual_pipe = _apply_ds_mode(pipe_mode)
+    client = _build_music_client(name, instr, music_mode)
+    actual_music = getattr(client, "mode", music_mode)
+
+    _music_runtime["backend"] = name
+    _music_runtime["is_instrumental"] = instr
+    _music_runtime["pipeline_mode"] = actual_pipe
+    _music_runtime["music_mode"] = actual_music
+    pipeline.music = client
+    pipeline.music_backend_name = name
+    pipeline.mode = actual_pipe
+    logger.info(
+        "流水线配置已更新 | backend=%s instrumental=%s pipeline_mode=%s music_mode=%s model=%s",
+        name, instr, actual_pipe, actual_music, getattr(client, "model", "?"),
+    )
+    return _music_config_payload()
+
+
 # 外部设备（ESP32）访问本服务的基准 URL；为空时 output_url 返回相对路径
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
+_apply_ds_mode(_music_runtime["pipeline_mode"])
 pipeline = CloudPipeline(
     ds=ds_client,
-    music=pipeline_music,
-    music_backend_name=pipeline_music_backend_name,
-    mode=os.getenv("PIPELINE_MODE", "mock"),
+    music=_build_music_client(_music_runtime["backend"], _music_runtime["is_instrumental"]),
+    music_backend_name=_music_runtime["backend"],
+    mode=_music_runtime["pipeline_mode"],
     base_url=BASE_URL,
 )
+_music_runtime["pipeline_mode"] = ds_client.mode
+_music_runtime["music_mode"] = getattr(pipeline.music, "mode", _music_runtime["music_mode"])
+pipeline.mode = _music_runtime["pipeline_mode"]
 
 
 # --- 页面 ----------------------------------------------------------------
@@ -107,7 +230,44 @@ def index():
 
 @app.get("/api/pipeline/health")
 def api_pipeline_health():
-    return jsonify(pipeline.health())
+    h = pipeline.health()
+    h.update(_music_config_payload())
+    return jsonify(h)
+
+
+@app.get("/api/pipeline/music-backend")
+def api_get_music_backend():
+    """当前音乐后端配置（供网页切换控件初始化）。"""
+    return jsonify(_music_config_payload())
+
+
+def _parse_bool_field(data: dict, form_key: str):
+    """从 JSON/form 解析可选 bool；未提供返回 None。"""
+    raw = data.get(form_key, request.form.get(form_key))
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).lower().strip() in ("1", "true", "yes", "on")
+
+
+@app.post("/api/pipeline/music-backend")
+def api_set_music_backend():
+    """网页热切换 funmusic / minimax、纯音乐、mock。无需改 .env。"""
+    data = request.get_json(silent=True) or {}
+    backend = (data.get("backend") or request.form.get("backend") or _music_runtime["backend"]).strip()
+    if not backend:
+        return jsonify({"error": "backend 不能为空（funmusic / minimax）"}), 400
+    instr = _parse_bool_field(data, "is_instrumental")
+    mock = _parse_bool_field(data, "mock")
+    try:
+        cfg = apply_music_backend(backend, instr, mock)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("切换音乐后端失败: %s", e, exc_info=True)
+        return jsonify({"error": "切换失败: " + str(e)}), 500
+    return jsonify({"ok": True, **cfg})
 
 
 @app.get("/api/samples")
@@ -121,9 +281,12 @@ def api_samples():
 
 @app.get("/api/history")
 def api_history():
-    """列出 outputs/ 下已生成的音乐，给 ESP32 历史列表页用。按生成时间倒序。"""
+    """列出 outputs/ 下已生成的音乐，给 ESP32 / 网页历史区用。按生成时间倒序。"""
     songs = []
-    for p in sorted(OUTPUTS_DIR.glob("*.mp3"), key=lambda x: x.stat().st_mtime, reverse=True):
+    files = list(OUTPUTS_DIR.glob("*.mp3")) + list(OUTPUTS_DIR.glob("*.wav"))
+    for p in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True):
+        if p.name.startswith("."):
+            continue
         st = p.stat()
         songs.append({
             "name": p.name,
@@ -132,6 +295,145 @@ def api_history():
             "created": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
         })
     return jsonify({"songs": songs})
+
+
+def _is_pipeline_log_line(line: str) -> bool:
+    """首页只展示生成过程相关日志，过滤健康检查/轮询/心跳。"""
+    if not line or not line.strip():
+        return False
+    # 明确丢弃：页面轮询、健康检查、静态心跳
+    drop_markers = (
+        "GET /api/logs",
+        "GET /api/history",
+        "GET /api/uploads",
+        "GET /api/pipeline/health",
+        "GET /api/samples",
+        "GET /favicon.ico",
+        "GET / HTTP",
+        "Debugger is active",
+        "Debugger PIN",
+        "Restarting with stat",
+        "Detected change in",
+        "Running on ",
+        "WARNING: This is a development server",
+        "Press CTRL+C to quit",
+        "Serving Flask app",
+        "Debug mode:",
+        " *  ",
+    )
+    if any(m in line for m in drop_markers):
+        return False
+    # 保留：业务 logger + 生成请求 + ESP32 下载成片 + 错误
+    keep_markers = (
+        "[ai_music]",
+        "[pipeline]",
+        "[dashscope]",
+        "[funmusic]",
+        "[minimax]",
+        "POST /api/generate/pipeline",
+        "GET /outputs/",
+        "流水线",
+        "ERROR",
+        "Traceback",
+        "ReadTimeout",
+        "File \"",
+        "raise ",
+        "requests.exceptions",
+    )
+    return any(m in line for m in keep_markers)
+
+
+@app.get("/api/logs")
+def api_logs():
+    """返回 pipeline 生成过程相关日志（已过滤轮询/健康检查）。"""
+    log_path = _log_dir / "pipeline.log"
+    try:
+        lines = int(request.args.get("lines") or 200)
+    except (TypeError, ValueError):
+        lines = 200
+    lines = max(20, min(lines, 2000))
+    if not log_path.exists():
+        return jsonify({"lines": [], "path": str(log_path), "mtime": None, "filtered": 0})
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return jsonify({"error": str(e), "lines": []}), 500
+    all_lines = text.splitlines()
+    # 先从尾部多取一些，再过滤，保证过滤后仍有足够行数
+    scan = all_lines[-max(lines * 8, 500):] if len(all_lines) > lines * 8 else all_lines
+    filtered = [ln for ln in scan if _is_pipeline_log_line(ln)]
+    tail = filtered[-lines:] if len(filtered) > lines else filtered
+    st = log_path.stat()
+    return jsonify({
+        "lines": tail,
+        "total": len(all_lines),
+        "filtered": len(filtered),
+        "path": "logs/pipeline.log",
+        "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+
+@app.delete("/api/logs")
+def api_clear_logs():
+    """清空 pipeline.log，方便重新观察一轮生成过程。"""
+    log_path = _log_dir / "pipeline.log"
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("")
+        # 重新打开 FileHandler，避免句柄仍指向旧内容
+        for h in list(logging.root.handlers) + list(logger.handlers):
+            if isinstance(h, logging.FileHandler) and Path(getattr(h, "baseFilename", "")).resolve() == log_path.resolve():
+                h.close()
+                h.stream = open(h.baseFilename, h.mode, encoding=h.encoding)
+        logger.info("日志已清空 | by=web")
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True, "cleared": "logs/pipeline.log"})
+
+
+@app.delete("/api/history/<path:filename>")
+def api_delete_history(filename: str):
+    """删除 outputs/ 下指定成片。"""
+    name = Path(filename).name
+    if not name or name.startswith(".") or ".." in filename:
+        return jsonify({"error": "非法文件名"}), 400
+    path = OUTPUTS_DIR / name
+    if not path.exists() or not path.is_file():
+        return jsonify({"error": "文件不存在"}), 404
+    if path.suffix.lower() not in (".mp3", ".wav"):
+        return jsonify({"error": "仅允许删除 mp3/wav"}), 400
+    try:
+        path.unlink()
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    logger.info("删除历史歌曲 | file=%s", name)
+    return jsonify({"ok": True, "deleted": name})
+
+
+@app.delete("/api/uploads/<path:filename>")
+def api_delete_upload(filename: str):
+    """删除 uploads/ 下录音（支持 browser 根目录或 esp32/ 子目录）。"""
+    # 只允许相对 uploads 的单层名，或 esp32/xxx
+    raw = filename.replace("\\", "/").lstrip("/")
+    if ".." in raw or raw.startswith("/"):
+        return jsonify({"error": "非法路径"}), 400
+    parts = Path(raw).parts
+    if len(parts) == 1:
+        path = UPLOAD_DIR / parts[0]
+    elif len(parts) == 2 and parts[0] == "esp32":
+        path = ESP32_UPLOAD_DIR / parts[1]
+    else:
+        return jsonify({"error": "路径不在允许范围"}), 400
+    if not path.exists() or not path.is_file():
+        return jsonify({"error": "文件不存在"}), 404
+    if path.name == ".gitkeep":
+        return jsonify({"error": "禁止删除"}), 400
+    try:
+        path.unlink()
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    logger.info("删除上传录音 | file=%s", raw)
+    return jsonify({"ok": True, "deleted": raw})
 
 
 @app.get("/api/uploads")
@@ -194,16 +496,32 @@ def api_generate_pipeline():
     if len(user_text) > int(os.getenv("MAX_PROMPT_CHARS", "500")):
         return jsonify({"error": "文字过长"}), 400
 
+    client_ip = request.remote_addr or "?"
+    src_label = "ESP32" if is_esp32 else "浏览器"
     try:
-        logger.info("流水线启动 | 环境音=%s 语音=%s 文字=%s 时长=%ss",
-                     env_path.name, speech_path.name if speech_path else None,
-                     user_text[:50] if user_text else None, duration)
+        logger.info(
+            "收到生成请求 | 来源=%s ip=%s 环境音=%s(%s) 语音=%s 文字=%s 时长=%ss",
+            src_label, client_ip, env_path.name,
+            f"{env_path.stat().st_size}B" if env_path.exists() else "?",
+            (f"{speech_path.name}({speech_path.stat().st_size}B)"
+             if speech_path and speech_path.exists() else None),
+            user_text[:50] if user_text else None, duration,
+        )
+        if is_esp32:
+            logger.info(
+                "ESP32 已上传文件 | env=%s speech=%s",
+                env_path.name, speech_path.name if speech_path else "(无)",
+            )
         result = pipeline.run(env_path, speech_path, user_text or None, duration)
     except Exception as e:
-        logger.error("流水线失败: %s", e, exc_info=True)
+        logger.error("流水线失败 | 来源=%s ip=%s err=%s", src_label, client_ip, e, exc_info=True)
         return jsonify({"error": "流水线调用失败: " + str(e)}), 502
     result["scheme"] = "cloud"
-    logger.info("流水线完成 | 输出=%s", result.get("output_url", "?"))
+    logger.info(
+        "流水线完成并返回客户端 | 来源=%s ip=%s 输出=%s 总耗时=%ss",
+        src_label, client_ip, result.get("output_url", "?"),
+        result.get("total_elapsed_sec", "?"),
+    )
     return jsonify(result)
 
 
@@ -211,6 +529,8 @@ def api_generate_pipeline():
 
 @app.get("/outputs/<path:filename>")
 def serve_output(filename: str):
+    name = Path(filename).name
+    logger.info("成片下载请求 | ip=%s file=%s", request.remote_addr or "?", name)
     return send_from_directory(OUTPUTS_DIR, filename)
 
 

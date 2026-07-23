@@ -668,8 +668,8 @@ static void __attribute__((noinline, optimize("O2"))) create_settings(void)
 static void goto_menu(lv_event_t *e)
 {
     (void)e;
+    if (rec_recording || s_bg_task) return;  /* 录音/上传/下载中不允许返回 */
     player_stop();
-    if (rec_recording || s_bg_task) return;  /* 录音/上传中不允许返回 */
     rec_recording = false;
     if (rec_start_label) lv_label_set_text(rec_start_label, LV_SYMBOL_PLAY "  开始");
     lv_scr_load(scr_menu);
@@ -711,53 +711,80 @@ static void goto_play(lv_event_t *e)
     if (g_play_url[0]) start_playback();
 }
 
-static void fill_hist_list(void)
+/* 用已解析的 g_hist 填充列表（须在 LVGL 锁内调用） */
+static void apply_hist_list(void)
 {
     lv_obj_clean(hist_list);
-    char *json = network_fetch_history();
-    if (!json) {
-        lv_list_add_text(hist_list, "获取历史失败");
+    if (g_hist_count == 0) {
+        lv_list_add_text(hist_list, "暂无歌曲");
         return;
     }
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, json);
-    free(json);
-    if (err) {
-        lv_list_add_text(hist_list, "解析失败");
-        return;
-    }
-    g_hist_count = 0;
-    JsonArray songs = doc["songs"].as<JsonArray>();
-    for (JsonObject song : songs) {
-        if (g_hist_count >= MAX_HIST) break;
-        const char *name = song["name"];
-        const char *url = song["url"];
-        if (!name || !url) continue;
-        strncpy(g_hist[g_hist_count].name, name, 63);
-        strncpy(g_hist[g_hist_count].url, url, 127);
-        g_hist[g_hist_count].name[63] = 0;
-        g_hist[g_hist_count].url[127] = 0;
-        lv_obj_t *btn = lv_list_add_btn(hist_list, LV_SYMBOL_AUDIO, g_hist[g_hist_count].name);
-        lv_obj_add_event_cb(btn, hist_item_cb, LV_EVENT_CLICKED, (void *)(intptr_t)g_hist_count);
+    for (int i = 0; i < g_hist_count; i++) {
+        lv_obj_t *btn = lv_list_add_btn(hist_list, LV_SYMBOL_AUDIO, g_hist[i].name);
+        lv_obj_add_event_cb(btn, hist_item_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_set_style_bg_color(btn, C_CARD, 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_text_color(btn, C_WHITE, 0);
         lv_obj_set_style_radius(btn, 8, 0);
         lv_obj_t *lab = lv_obj_get_child(btn, 0);
         lv_obj_set_style_text_font(lab, f16, 0);
-        g_hist_count++;
     }
-    if (g_hist_count == 0)
-        lv_list_add_text(hist_list, "暂无歌曲");
+}
+
+/* 后台拉历史，避免在 LVGL 事件里阻塞 HTTP + free 大缓冲后立刻建表 */
+static void hist_fetch_task(void *arg)
+{
+    (void)arg;
+    char *json = network_fetch_history();
+    int count = 0;
+    const char *err_msg = NULL;
+
+    if (!json) {
+        err_msg = "获取历史失败";
+    } else {
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, json);
+        free(json);
+        if (err) {
+            err_msg = "解析失败";
+        } else {
+            JsonArray songs = doc["songs"].as<JsonArray>();
+            for (JsonObject song : songs) {
+                if (count >= MAX_HIST) break;
+                const char *name = song["name"];
+                const char *url = song["url"];
+                if (!name || !url) continue;
+                strncpy(g_hist[count].name, name, 63);
+                strncpy(g_hist[count].url, url, 127);
+                g_hist[count].name[63] = 0;
+                g_hist[count].url[127] = 0;
+                count++;
+            }
+        }
+    }
+
+    lvgl_port_lock(-1);
+    g_hist_count = count;
+    if (err_msg) {
+        lv_obj_clean(hist_list);
+        lv_list_add_text(hist_list, err_msg);
+    } else {
+        apply_hist_list();
+    }
+    s_bg_task = NULL;
+    lvgl_port_unlock();
+    vTaskDelete(NULL);
 }
 
 static void goto_hist(lv_event_t *e)
 {
     (void)e;
-    if (s_bg_task) return;  /* 下载/上传中不允许离开 */
+    if (s_bg_task) return;  /* 下载/上传/拉历史中不允许离开 */
     player_stop();
+    lv_obj_clean(hist_list);
+    lv_list_add_text(hist_list, "加载中...");
     lv_scr_load(scr_hist);
-    fill_hist_list();
+    xTaskCreatePinnedToCore(hist_fetch_task, "hist", 16384, NULL, 1, &s_bg_task, 0);
 }
 
 static void goto_settings(lv_event_t *e)

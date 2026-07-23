@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <stdio.h>
 #include "esp_heap_caps.h"
+#include "driver/i2s.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "AudioGeneratorMP3.h"
@@ -12,6 +13,9 @@
 #include "AudioFileSource.h"
 #include "AudioFileSourceHTTPStream.h"
 #include "AudioFileSourceBuffer.h"
+
+/* 整首下载上限：8MB OPI PSRAM 需给 LVGL/WiFi/JSON 留余量 */
+static const int PLAYER_MAX_MP3_BYTES = 6 * 1024 * 1024;
 
 /* 从 PSRAM 内存缓冲读取的 AudioFileSource, 不依赖 NetworkClientSecure */
 class AudioFileSourceMEM : public AudioFileSource
@@ -42,9 +46,29 @@ private:
     uint32_t _len, _pos;
 };
 
+/*
+ * ESP8266Audio 默认 stop() 会 i2s_driver_uninstall。
+ * 返回键在 LVGL 任务里 stop + 立刻拉历史，卸载 I2S 易导致 abort/重启。
+ * 软停：只清 DMA，保留驱动，下次 begin() 直接复用。
+ */
+class SoftAudioOutputI2S : public AudioOutputI2S
+{
+public:
+    SoftAudioOutputI2S(int port, int output_mode, int dma_buf_count)
+        : AudioOutputI2S(port, output_mode, dma_buf_count) {}
+    bool stop() override
+    {
+        if (!i2sOn) return false;
+#ifdef ESP32
+        i2s_zero_dma_buffer((i2s_port_t)portNo);
+#endif
+        return true;
+    }
+};
+
 static AudioGeneratorMP3 *s_mp3 = NULL;
 static AudioFileSourceMEM *s_file = NULL;
-static AudioOutputI2S *s_out = NULL;
+static SoftAudioOutputI2S *s_out = NULL;
 static uint8_t *s_mp3_buf = NULL;
 static size_t s_mp3_size = 0;
 static bool s_inited = false;
@@ -68,12 +92,12 @@ bool player_init(void)
 {
     if (s_inited) return true;
     if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
-    s_out = new AudioOutputI2S(1, 0, 8);
+    s_out = new SoftAudioOutputI2S(1, 0, 8);
     s_out->SetPinout(I2S_PLAY_BCLK, I2S_PLAY_LRC, I2S_PLAY_DIN);
-    s_out->SetGain(0.6);
+    s_out->SetGain(0.5);
     s_mp3 = new AudioGeneratorMP3();
     s_inited = true;
-    Serial.println("[play] MAX98357A I2S1 init OK");
+    Serial.println("[play] MAX98357A I2S1 init OK (soft stop)");
     return true;
 }
 
@@ -110,6 +134,7 @@ bool player_play(const char *url, player_download_cb_t dl_cb)
     player_stop();
     if (!url || !url[0]) return false;
 
+    s_source_mode = PLAYER_SOURCE_MEMORY;
     s_state = PLAYER_DOWNLOADING;
     Serial.printf("[play] downloading %s\n", url);
     WiFiClient client;
@@ -130,6 +155,12 @@ bool player_play(const char *url, player_download_cb_t dl_cb)
 
     int len = http.getSize();
     if (len <= 0) len = 5 * 1024 * 1024;
+    if (len > PLAYER_MAX_MP3_BYTES) {
+        Serial.printf("[play] file too large: %d > max %d\n", len, PLAYER_MAX_MP3_BYTES);
+        http.end();
+        s_state = PLAYER_ERROR;
+        return false;
+    }
     Serial.printf("[play] allocating %d bytes in PSRAM\n", len);
 
     s_mp3_buf = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
@@ -293,11 +324,18 @@ static void player_stop_stream_internals(void)
 void player_stop(void)
 {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_mp3 && s_mp3->isRunning()) s_mp3->stop();
+    /* 先标记 idle，避免 stop 过程中 loop 继续喂解码器 */
+    s_state = PLAYER_IDLE;
+    s_source_mode = PLAYER_SOURCE_MEMORY;
+    if (s_mp3 && s_mp3->isRunning()) {
+        s_mp3->stop(); /* SoftAudioOutputI2S::stop 不清卸载 I2S */
+    }
     if (s_file) { delete s_file; s_file = NULL; }
     if (s_mp3_buf) { free(s_mp3_buf); s_mp3_buf = NULL; s_mp3_size = 0; }
     player_stop_stream_internals();
-    s_state = PLAYER_IDLE;
+    s_duration_ms = 0;
+    s_start_ms = 0;
+    s_pause_accum = 0;
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
@@ -352,22 +390,22 @@ int player_buffer_fill_pct(void)
 void player_loop(void)
 {
     if (!s_mutex || !xSemaphoreTake(s_mutex, 0)) return;
+    if (s_state != PLAYER_PLAYING || !s_mp3 || !s_mp3->isRunning()) {
+        xSemaphoreGive(s_mutex);
+        return;
+    }
     if (s_source_mode == PLAYER_SOURCE_STREAM) {
-        if (s_state == PLAYER_PLAYING && s_mp3 && s_mp3->isRunning()) {
-            if (s_stream_buf) s_stream_buf->loop();
-            if (!s_mp3->loop()) {
-                s_mp3->stop();
-                s_state = PLAYER_FINISHED;
-                Serial.println("[play] stream: finished");
-            }
+        if (s_stream_buf) s_stream_buf->loop();
+        if (!s_mp3->loop()) {
+            s_mp3->stop();
+            s_state = PLAYER_FINISHED;
+            Serial.println("[play] stream: finished");
         }
     } else {
-        if (s_state == PLAYER_PLAYING && s_mp3 && s_mp3->isRunning()) {
-            if (!s_mp3->loop()) {
-                s_mp3->stop();
-                s_state = PLAYER_FINISHED;
-                Serial.println("[play] finished");
-            }
+        if (!s_mp3->loop()) {
+            s_mp3->stop();
+            s_state = PLAYER_FINISHED;
+            Serial.println("[play] finished");
         }
     }
     xSemaphoreGive(s_mutex);

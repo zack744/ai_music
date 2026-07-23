@@ -22,7 +22,7 @@
 | 路径 | 用途 | 当前状态 |
 |---|---|---|
 | `esp32_firmware_idf55/` | **新版完整固件主工程** | 唯一固件工程 |
-| `esp32_diagnostics/` | IDF 5.5 最小 PSRAM/WiFi/HTTP 诊断工程 | 测试已通过，保留源码参考 |
+| `esp32_diagnostics/` | 曾用于 IDF 5.5 最小诊断 | **2026-07-23 已删除**（结论已验证） |
 | `D:\platformio_diag` | PlatformIO 包目录 | 新工程使用（唯一） |
 
 旧版 `esp32_firmware/` 目录和旧 `D:\platformio` 环境已删除。旧安全固件二进制已归档至 `releases/legacy-idf53-safe/`。
@@ -134,7 +134,7 @@ shutil.which("platformio.exe")
 
 ```text
 logs/serial_diag_55_03_39_20260722.txt
-esp32_diagnostics/DIAGNOSTIC_RESULTS.md
+esp32_diagnostics/DIAGNOSTIC_RESULTS.md（工程已删，结论见上文 §2）
 ```
 
 结论：**板子性能和 PSRAM 硬件没有问题；旧崩溃属于旧软件栈。**
@@ -427,7 +427,7 @@ $env:PATH='C:\Users\PC\.platformio\penv\Scripts;' + $env:PATH
 | `src/config.h` | I2S引脚、自检开关（`PLAYER_DEFAULT_STREAM=0`） |
 | `releases/2026-07-22-idf55/` | 正式版固件二进制归档 |
 | `releases/legacy-idf53-safe/` | 旧版安全固件归档 |
-| `../esp32_diagnostics/DIAGNOSTIC_RESULTS.md` | 新版底层稳定性证明 |
+| ~~`../esp32_diagnostics/`~~ | 诊断工程已删除（2026-07-23） |
 
 ---
 

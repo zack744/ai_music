@@ -17,11 +17,17 @@
 import json
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 import requests
 
 logger = logging.getLogger("minimax")
+
+
+def _music_filename(prefix: str, ext: str) -> str:
+    """模型简称-日期时间.扩展名，如 minimax-20260723-124633.mp3"""
+    return f"{prefix}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{ext}"
 
 
 # MiniMax API 基础地址（国内）
@@ -63,17 +69,32 @@ class MiniMaxMusicClient:
         return self._real_generate(prompt, duration_sec, lyrics)
 
     def _mock_generate(self, prompt: str, duration_sec: int) -> Path:
+        """mock 优先复制内置 mp3（ESP32 只能播 mp3），否则写短静音 wav。"""
+        import shutil
+        out_path = self.output_dir / _music_filename("minimax-mock", "mp3")
+        root = Path(__file__).resolve().parent.parent
+        candidates = list((root / "audio_samples").glob("*.mp3"))
+        candidates += list((root / "static" / "outputs").glob("*.mp3"))
+        for src in candidates:
+            if src.name.startswith("."):
+                continue
+            try:
+                shutil.copyfile(src, out_path)
+                logger.info("MiniMax mock 复制素材 | src=%s -> %s", src.name, out_path.name)
+                return out_path
+            except OSError:
+                continue
         import wave
         import struct
-        # 静音 wav 占位
         sample_rate = 44100
         n_samples = int(sample_rate * min(duration_sec, 5))
-        out_path = self.output_dir / f"minimax_mock_{int(time.time())}.wav"
+        out_path = self.output_dir / _music_filename("minimax-mock", "wav")
         with wave.open(str(out_path), "wb") as w:
             w.setnchannels(2)
             w.setsampwidth(2)
             w.setframerate(sample_rate)
             w.writeframes(struct.pack("<" + "h" * n_samples * 2, *([0] * n_samples * 2)))
+        logger.warning("MiniMax mock 无可用 mp3 素材，已写静音 wav=%s", out_path.name)
         return out_path
 
     def _real_generate(self, prompt: str, duration_sec: int, lyrics: str = "") -> Path:
@@ -127,7 +148,7 @@ class MiniMaxMusicClient:
                      extra.get("music_duration", "?"), extra.get("music_size", "?"), audio_url[:80])
 
         # 下载 OSS URL 到本地
-        out_path = self.output_dir / f"minimax_{int(time.time())}.mp3"
+        out_path = self.output_dir / _music_filename("minimax", "mp3")
         logger.info("MiniMax 下载音频 -> %s", out_path.name)
         audio_resp = requests.get(audio_url, timeout=120, stream=True)
         audio_resp.raise_for_status()
