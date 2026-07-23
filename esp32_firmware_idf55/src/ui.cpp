@@ -2,7 +2,14 @@
 #include "esp_log.h"
 #include <stdio.h>
 #include <ArduinoJson.h>
-#include "network.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include "lvgl_v8_port.h"
+#include "net_helper.h"
+#include "recorder.h"
+#include "uploader.h"
+#include "player.h"
+#include "config.h"
 
 static const char *TAG = "ui";
 
@@ -12,8 +19,23 @@ static const char *TAG = "ui";
  * 五页:主菜单 / 录音 / 生成中 / 播放 / 历史
  * ===================================================================== */
 
-static lv_font_t *f16 = &lv_font_zh_16;
-static lv_font_t *f22 = &lv_font_zh_22;
+/* 生成字体在 LVGL 8 下是 const，位于 Flash 映射只读区。
+ * fallback 属于字体描述符运行时字段，因此在 RAM 中保留可变副本。 */
+static lv_font_t s_font_zh_16_runtime;
+static lv_font_t s_font_zh_22_runtime;
+static lv_font_t *f16 = &s_font_zh_16_runtime;
+static lv_font_t *f22 = &s_font_zh_22_runtime;
+static bool s_fonts_ready = false;
+
+static void ensure_fonts_ready(void)
+{
+    if (s_fonts_ready) return;
+    s_font_zh_16_runtime = lv_font_zh_16;
+    s_font_zh_22_runtime = lv_font_zh_22;
+    s_font_zh_16_runtime.fallback = &lv_font_montserrat_14;
+    s_font_zh_22_runtime.fallback = &lv_font_montserrat_14;
+    s_fonts_ready = true;
+}
 
 /* ---- 配色 (from Figma) ---- */
 static const lv_color_t C_BG       = LV_COLOR_MAKE(0x12, 0x14, 0x14);
@@ -35,7 +57,7 @@ static const lv_color_t C_MUTED_G  = LV_COLOR_MAKE(0x84, 0x95, 0x87);
 static const lv_color_t C_INNER    = LV_COLOR_MAKE(0x1A, 0x1C, 0x1C);
 
 /* ---- screens ---- */
-static lv_obj_t *scr_menu, *scr_record, *scr_gen, *scr_play, *scr_hist;
+static lv_obj_t *scr_menu, *scr_record, *scr_gen, *scr_play, *scr_hist, *scr_settings;
 
 /* ---- 录音页运行时控件 ---- */
 static lv_obj_t *rec_step_label, *rec_pill_label, *rec_timer_label;
@@ -51,6 +73,7 @@ static lv_timer_t *gen_timer = NULL;
 
 /* ---- 播放页运行时控件 ---- */
 static lv_obj_t *play_name, *play_bar, *play_btn_label = NULL;
+static lv_obj_t *play_status, *play_time_cur, *play_time_tot = NULL;
 
 /* ---- 演示数据 ---- */
 static const char *cur_song = "Midnight Drift";
@@ -59,12 +82,36 @@ static struct { char name[64]; char url[128]; } g_hist[MAX_HIST];
 static int g_hist_count = 0;
 static lv_obj_t *hist_list = NULL;
 
+/* ---- 录音/上传/播放数据 ---- */
+static uint8_t *g_env_wav = NULL;
+static size_t g_env_size = 0;
+static uint8_t *g_speech_wav = NULL;
+static size_t g_speech_size = 0;
+static char g_output_url[300] = {0};
+static bool g_gen_ok = false;
+static TaskHandle_t s_bg_task = NULL;
+
+/* ---- 播放目标(生成结果 或 历史选中) ---- */
+static char g_play_url[320] = {0};
+
+/* ---- 设置页运行时 ---- */
+static lv_obj_t *set_ip_label = NULL;
+static char set_ip_buf[40] = {0};
+static const char *numpad_map[] = {
+    "1", "2", "3", "\n",
+    "4", "5", "6", "\n",
+    "7", "8", "9", "\n",
+    ".", "0", LV_SYMBOL_BACKSPACE, "\n",
+    "Save", "Back", ""
+};
+
 /* ---- 前置声明 ---- */
 static void goto_menu(lv_event_t *e);
 static void goto_record(lv_event_t *e);
 static void goto_gen(lv_event_t *e);
 static void goto_play(lv_event_t *e);
 static void goto_hist(lv_event_t *e);
+static void goto_settings(lv_event_t *e);
 static void update_record_page(void);
 
 /* ===================== 辅助 ===================== */
@@ -132,6 +179,11 @@ static void create_menu(void)
     lv_obj_t *t = new_label(header, "AI音乐", f22, C_GREEN);
     lv_obj_center(t);
 
+    /* 右上角设置按钮 */
+    lv_obj_t *bSet = new_btn(scr_menu, LV_SYMBOL_SETTINGS, goto_settings,
+                             36, 36, C_DARKER, C_ICON_INA, f16, 8, false);
+    lv_obj_set_pos(bSet, 196, 4);
+
     /* 生成歌曲 */
     lv_obj_t *b1 = new_btn(scr_menu, LV_SYMBOL_AUDIO "  生成歌曲", goto_record,
                            208, 64, C_GREEN, C_BLACK, f22, 12, true);
@@ -159,48 +211,55 @@ static void create_menu(void)
 }
 
 /* ===================== 录音页 ===================== */
-static void rec_countdown_cb(lv_timer_t *t)
+static void rec_progress_cb(int sec)
 {
-    rec_countdown--;
-    if (rec_countdown <= 0) {
-        lv_label_set_text(rec_timer_label, "0");
-        lv_label_set_text(rec_step_label, "已录制");
-        lv_label_set_text(rec_start_label, LV_SYMBOL_PLAY "  开始");
-        rec_recording = false;
-        rec_timer = NULL;
-        if (rec_step == 1) { rec_step = 2; update_record_page(); }
-        return;
-    }
+    lvgl_port_lock(-1);
     char buf[8];
-    snprintf(buf, sizeof(buf), "%d", rec_countdown);
+    snprintf(buf, sizeof(buf), "%d", sec);
     lv_label_set_text(rec_timer_label, buf);
+    lvgl_port_unlock();
+}
+
+static void rec_task(void *arg)
+{
+    size_t wav_size = 0;
+    uint8_t *wav = recorder_record(REC_DURATION_SEC, &wav_size, rec_progress_cb);
+
+    lvgl_port_lock(-1);
+    if (wav) {
+        if (rec_step == 1) { if (g_env_wav) free(g_env_wav); g_env_wav = wav; g_env_size = wav_size; }
+        else               { if (g_speech_wav) free(g_speech_wav); g_speech_wav = wav; g_speech_size = wav_size; }
+        lv_label_set_text(rec_step_label, rec_step == 1 ? "环境音已录" : "心里话已录");
+        lv_label_set_text(rec_start_label, "已录制");
+    } else {
+        lv_label_set_text(rec_step_label, "录音失败");
+        lv_label_set_text(rec_start_label, LV_SYMBOL_PLAY "  开始");
+    }
+    rec_recording = false;
+    lvgl_port_unlock();
+    s_bg_task = NULL;
+    vTaskDelete(NULL);
 }
 
 static void rec_toggle_cb(lv_event_t *e)
 {
     (void)e;
-    if (!rec_recording) {
-        rec_recording = true;
-        rec_countdown = 30;
-        lv_label_set_text(rec_step_label, "录音中...");
-        lv_label_set_text(rec_timer_label, "30");
-        lv_label_set_text(rec_start_label, LV_SYMBOL_STOP "  结束");
-        if (rec_timer) lv_timer_del(rec_timer);
-        rec_timer = lv_timer_create(rec_countdown_cb, 1000, NULL);
-        lv_timer_set_repeat_count(rec_timer, 30);
-    } else {
-        rec_recording = false;
-        if (rec_timer) { lv_timer_del(rec_timer); rec_timer = NULL; }
-        lv_label_set_text(rec_step_label, "已录制");
-        lv_label_set_text(rec_start_label, LV_SYMBOL_PLAY "  开始");
-        if (rec_step == 1) { rec_step = 2; rec_countdown = 30; update_record_page(); }
+    if (rec_recording) {
+        recorder_stop();
+        return;
     }
+    if (s_bg_task) return;
+    rec_recording = true;
+    lv_label_set_text(rec_step_label, "录音中...");
+    lv_label_set_text(rec_start_label, LV_SYMBOL_STOP "  停");
+    lv_label_set_text(rec_timer_label, "0");
+    recorder_init();
+    xTaskCreatePinnedToCore(rec_task, "rec", 8192, NULL, 1, &s_bg_task, 0);
 }
 
 static void rec_next_cb(lv_event_t *e)
 {
-    if (rec_timer) { lv_timer_del(rec_timer); rec_timer = NULL; }
-    rec_recording = false;
+    if (rec_recording || s_bg_task) return;
     lv_label_set_text(rec_start_label, LV_SYMBOL_PLAY "  开始");
     if (rec_step == 1) {
         rec_step = 2;
@@ -219,7 +278,7 @@ static void update_record_page(void)
         lv_label_set_text(rec_step_label, "录心里话");
         lv_label_set_text(rec_pill_label, "2/2");
     }
-    lv_label_set_text(rec_timer_label, "30");
+    lv_label_set_text(rec_timer_label, "0");
 }
 
 static void create_record(void)
@@ -253,7 +312,7 @@ static void create_record(void)
     lv_obj_set_style_border_color(circle, C_GREEN, 0);
     /* 阴影已移除 */
     lv_obj_set_pos(circle, 60, 70);
-    rec_timer_label = new_label(circle, "30", f22, C_GREEN);
+    rec_timer_label = new_label(circle, "0", f22, C_GREEN);
     lv_obj_center(rec_timer_label);
 
     /* 开始/结束 按钮 */
@@ -272,12 +331,30 @@ static void create_record(void)
 }
 
 /* ===================== 生成中 ===================== */
-static void gen_timer_cb(lv_timer_t *t)
+static void gen_finish_cb(lv_event_t *e)
 {
-    (void)t;
-    lv_label_set_text(gen_status, "已生成");
+    if (g_gen_ok) {
+        strncpy(g_play_url, g_output_url, sizeof(g_play_url) - 1);
+        g_play_url[sizeof(g_play_url) - 1] = 0;
+        cur_song = "New Song";
+        goto_play(e);
+    } else {
+        goto_menu(e);
+    }
+}
+
+static void upload_task(void *arg)
+{
+    bool ok = uploader_upload(g_env_wav, g_env_size,
+                              g_speech_wav, g_speech_size,
+                              NULL, 30, g_output_url, sizeof(g_output_url));
+    lvgl_port_lock(-1);
+    g_gen_ok = ok;
+    lv_label_set_text(gen_status, ok ? "已生成" : "生成失败");
     lv_obj_clear_flag(gen_btn, LV_OBJ_FLAG_HIDDEN);
-    gen_timer = NULL;
+    lvgl_port_unlock();
+    s_bg_task = NULL;
+    vTaskDelete(NULL);
 }
 
 static void create_gen(void)
@@ -303,19 +380,103 @@ static void create_gen(void)
     new_label(scr_gen, "AI 正在生成音乐...", f16, C_TEXT_GG);
 
     /* 完成按钮:初始隐藏,生成结束后由定时器显示 */
-    gen_btn = new_btn(scr_gen, "完成", goto_play, lv_pct(85), 48, C_GREEN, C_DKGREEN, f22, 8, true);
+    gen_btn = new_btn(scr_gen, "完成", gen_finish_cb, lv_pct(85), 48, C_GREEN, C_DKGREEN, f22, 8, true);
     lv_obj_add_flag(gen_btn, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* ===================== 播放页 ===================== */
+static void fmt_time(char *buf, size_t n, int ms)
+{
+    if (ms < 0) ms = 0;
+    int sec = ms / 1000;
+    snprintf(buf, n, "%d:%02d", sec / 60, sec % 60);
+}
+
+/* 下载进度回调(后台任务上下文) */
+static void dl_progress_cb(int pct)
+{
+    lvgl_port_lock(-1);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "下载中 %d%%", pct);
+    lv_label_set_text(play_status, buf);
+    lv_bar_set_value(play_bar, pct, LV_ANIM_OFF);
+    lvgl_port_unlock();
+}
+
+static void play_ui_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (lv_scr_act() != scr_play) return;
+    player_state_t st = player_state();
+    int el = player_elapsed_ms();
+    int du = player_duration_ms();
+    char buf[16];
+
+    if (st == PLAYER_PLAYING || st == PLAYER_PAUSED || st == PLAYER_FINISHED) {
+        int pct = (du > 0) ? el * 100 / du : 0;
+        if (pct > 100) pct = 100;
+        lv_bar_set_value(play_bar, pct, LV_ANIM_OFF);
+        fmt_time(buf, sizeof(buf), el);
+        lv_label_set_text(play_time_cur, buf);
+        fmt_time(buf, sizeof(buf), du);
+        lv_label_set_text(play_time_tot, buf);
+    }
+    if (st == PLAYER_DOWNLOADING) {
+        lv_label_set_text(play_status, "下载中...");
+    } else if (st == PLAYER_PLAYING) {
+        lv_label_set_text(play_status, "");
+        lv_label_set_text(play_btn_label, LV_SYMBOL_PAUSE "  暂停");
+    } else if (st == PLAYER_PAUSED) {
+        lv_label_set_text(play_status, "已暂停");
+        lv_label_set_text(play_btn_label, LV_SYMBOL_PLAY "  播放");
+    } else if (st == PLAYER_FINISHED) {
+        lv_label_set_text(play_status, "播放完成");
+        lv_label_set_text(play_btn_label, LV_SYMBOL_REFRESH "  重播");
+    } else if (st == PLAYER_ERROR) {
+        lv_label_set_text(play_status, "播放失败");
+        lv_label_set_text(play_btn_label, LV_SYMBOL_REFRESH "  重试");
+    } else if (st == PLAYER_DOWNLOADING) {
+        lv_label_set_text(play_status, "下载中...");
+    }
+}
+
+/* 后台任务: 下载 mp3 并开始播放 */
+static void play_task(void *arg)
+{
+    (void)arg;
+    char url[320];
+    strncpy(url, g_play_url, sizeof(url) - 1);
+    url[sizeof(url) - 1] = 0;
+    bool ok = player_play(url, dl_progress_cb);
+    lvgl_port_lock(-1);
+    if (!ok) lv_label_set_text(play_status, "播放失败");
+    s_bg_task = NULL;
+    lvgl_port_unlock();
+    vTaskDelete(NULL);
+}
+
+static void start_playback(void)
+{
+    if (s_bg_task) return;
+    lv_label_set_text(play_status, "下载中...");
+    lv_bar_set_value(play_bar, 0, LV_ANIM_OFF);
+    lv_label_set_text(play_time_cur, "0:00");
+    lv_label_set_text(play_time_tot, "0:00");
+    xTaskCreatePinnedToCore(play_task, "play", 12288, NULL, 1, &s_bg_task, 0);
+}
+
 static void play_toggle_cb(lv_event_t *e)
 {
     (void)e;
-    static bool paused = false;
-    paused = !paused;
-    lv_label_set_text(play_name, paused ? "已暂停" : cur_song);
-    if (play_btn_label)
-        lv_label_set_text(play_btn_label, paused ? LV_SYMBOL_PLAY "  播放" : LV_SYMBOL_PAUSE "  暂停");
+    player_state_t st = player_state();
+    if (st == PLAYER_PLAYING) {
+        player_pause();
+    } else if (st == PLAYER_PAUSED) {
+        player_resume();
+    } else if ((st == PLAYER_FINISHED || st == PLAYER_ERROR) && g_play_url[0]) {
+        player_stop();
+        start_playback();
+    }
 }
 
 static void create_play(void)
@@ -332,7 +493,7 @@ static void create_play(void)
 
     /* 唱片圆 */
     lv_obj_t *disc = lv_obj_create(scr_play);
-    lv_obj_set_size(disc, 150, 150);
+    lv_obj_set_size(disc, 130, 130);
     set_bg(disc, C_CARD);
     lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(disc, 4, 0);
@@ -346,13 +507,16 @@ static void create_play(void)
     lv_obj_center(center);
 
     /* 歌名 */
-    play_name = new_label(scr_play, "Midnight Drift", f22, C_TEXT_LT);
+    play_name = new_label(scr_play, "-", f22, C_TEXT_LT);
+
+    /* 状态行(下载进度/暂停/完成/失败) */
+    play_status = new_label(scr_play, "", f16, C_TEXT_GG);
 
     /* 进度条 */
     play_bar = lv_bar_create(scr_play);
     lv_obj_set_size(play_bar, 200, 6);
     lv_bar_set_range(play_bar, 0, 100);
-    lv_bar_set_value(play_bar, 25, LV_ANIM_OFF);
+    lv_bar_set_value(play_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(play_bar, C_GRAYBTN, 0);
     lv_obj_set_style_bg_opa(play_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(play_bar, 999, 0);
@@ -365,8 +529,8 @@ static void create_play(void)
     lv_obj_t *time_row = new_box(scr_play, 210, 16);
     lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    new_label(time_row, "0:45", f16, C_TEXT_GG);
-    new_label(time_row, "3:20", f16, C_TEXT_GG);
+    play_time_cur = new_label(time_row, "0:00", f16, C_TEXT_GG);
+    play_time_tot = new_label(time_row, "0:00", f16, C_TEXT_GG);
 
     /* 控制按钮 */
     lv_obj_t *ctrl = new_box(scr_play, lv_pct(100), 50);
@@ -376,14 +540,27 @@ static void create_play(void)
     lv_obj_t *bPlay = new_btn(ctrl, LV_SYMBOL_PAUSE "  暂停", play_toggle_cb, 100, 44, C_GREEN_BR, C_GREEN_DK, f16, 8, false);
     play_btn_label = lv_obj_get_child(bPlay, 0);
     new_btn(ctrl, "返回", goto_hist, 100, 44, C_GRAYBTN, C_TEXT_LT, f16, 8, false);
+
+    /* UI 刷新定时器(250ms, 只在播放页激活时生效) */
+    lv_timer_create(play_ui_timer_cb, 250, NULL);
 }
 
 /* ===================== 历史页 ===================== */
 static void hist_item_cb(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx >= 0 && idx < g_hist_count)
+    if (idx >= 0 && idx < g_hist_count) {
         cur_song = g_hist[idx].name;
+        /* 后端可能返回相对路径(/outputs/x.mp3), 补成绝对 URL */
+        const char *u = g_hist[idx].url;
+        if (u[0] == '/') {
+            snprintf(g_play_url, sizeof(g_play_url), "http://%s:5000%s",
+                     network_server_ip(), u);
+        } else {
+            strncpy(g_play_url, u, sizeof(g_play_url) - 1);
+            g_play_url[sizeof(g_play_url) - 1] = 0;
+        }
+    }
     goto_play(e);
 }
 
@@ -413,11 +590,86 @@ static void create_hist(void)
             lv_pct(85), 48, C_GRAYBTN, C_WHITE, f22, 999, false);
 }
 
+/* ===================== 设置页 ===================== */
+static void set_numpad_cb(lv_event_t *e)
+{
+    lv_obj_t *btnm = lv_event_get_target(e);
+    uint16_t id = lv_btnmatrix_get_selected_btn(btnm);
+    if (id == LV_BTNMATRIX_BTN_NONE) return;
+    const char *txt = lv_btnmatrix_get_btn_text(btnm, id);
+    if (!txt) return;
+
+    if (strcmp(txt, LV_SYMBOL_BACKSPACE) == 0) {
+        size_t len = strlen(set_ip_buf);
+        if (len > 0) set_ip_buf[len - 1] = 0;
+    } else if (strcmp(txt, "Save") == 0) {
+        if (strlen(set_ip_buf) > 0) {
+            network_set_server_ip(set_ip_buf);
+            ESP_LOGI(TAG, "server IP saved: %s", set_ip_buf);
+        }
+        goto_menu(e);
+        return;
+    } else if (strcmp(txt, "Back") == 0) {
+        goto_menu(e);
+        return;
+    } else {
+        size_t len = strlen(set_ip_buf);
+        if (len < sizeof(set_ip_buf) - 1) {
+            set_ip_buf[len] = txt[0];
+            set_ip_buf[len + 1] = 0;
+        }
+    }
+    lv_label_set_text(set_ip_label, set_ip_buf);
+}
+
+static void __attribute__((noinline, optimize("O2"))) create_settings(void)
+{
+    scr_settings = lv_obj_create(NULL);
+    set_bg(scr_settings, C_BG);
+    lv_obj_set_style_pad_all(scr_settings, 0, 0);
+
+    /* 标题 */
+    lv_obj_t *title = new_label(scr_settings, "Server IP", f22, C_GREEN);
+    lv_obj_set_pos(title, 16, 10);
+
+    /* IP 显示框 */
+    lv_obj_t *box = new_box(scr_settings, 208, 44);
+    lv_obj_set_pos(box, 16, 42);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_border_color(box, C_GREEN, 0);
+    lv_obj_set_style_radius(box, 8, 0);
+    set_ip_label = new_label(box, "", f22, C_TEXT_LT);
+    lv_obj_align(set_ip_label, LV_ALIGN_LEFT_MID, 8, 0);
+
+    /* 数字键盘 */
+    lv_obj_t *btnm = lv_btnmatrix_create(scr_settings);
+    lv_obj_set_size(btnm, 208, 210);
+    lv_obj_set_pos(btnm, 16, 96);
+    lv_btnmatrix_set_map(btnm, numpad_map);
+    lv_btnmatrix_set_btn_width(btnm, 12, 2);  /* Save 宽 2 */
+    lv_btnmatrix_set_btn_width(btnm, 13, 2);  /* Back 宽 2 */
+    lv_obj_add_event_cb(btnm, set_numpad_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* 键盘样式 */
+    lv_obj_set_style_bg_opa(btnm, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnm, 0, 0);
+    lv_obj_set_style_pad_all(btnm, 0, 0);
+    lv_obj_set_style_pad_gap(btnm, 4, 0);
+    lv_obj_set_style_bg_color(btnm, C_CARD, LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(btnm, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(btnm, C_GREEN, LV_PART_ITEMS);
+    lv_obj_set_style_text_font(btnm, f22, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(btnm, 0, LV_PART_ITEMS);
+    lv_obj_set_style_radius(btnm, 8, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_width(btnm, 0, LV_PART_ITEMS);
+}
+
 /* ===================== 页面跳转 ===================== */
 static void goto_menu(lv_event_t *e)
 {
     (void)e;
-    if (rec_timer) { lv_timer_del(rec_timer); rec_timer = NULL; }
+    player_stop();
+    if (rec_recording || s_bg_task) return;  /* 录音/上传中不允许返回 */
     rec_recording = false;
     if (rec_start_label) lv_label_set_text(rec_start_label, LV_SYMBOL_PLAY "  开始");
     lv_scr_load(scr_menu);
@@ -426,7 +678,6 @@ static void goto_menu(lv_event_t *e)
 static void goto_record(lv_event_t *e)
 {
     (void)e;
-    if (rec_timer) { lv_timer_del(rec_timer); rec_timer = NULL; }
     rec_step = 1;
     rec_recording = false;
     if (rec_start_label) lv_label_set_text(rec_start_label, LV_SYMBOL_PLAY "  开始");
@@ -438,21 +689,26 @@ static void goto_gen(lv_event_t *e)
 {
     (void)e;
     ESP_LOGI(TAG, "-> gen");
-    lv_label_set_text(gen_status, "创作中...");
+    lv_label_set_text(gen_status, "上传生成中...");
     lv_obj_add_flag(gen_btn, LV_OBJ_FLAG_HIDDEN);
-    if (gen_timer) { lv_timer_del(gen_timer); gen_timer = NULL; }
-    gen_timer = lv_timer_create(gen_timer_cb, 3000, NULL);
-    lv_timer_set_repeat_count(gen_timer, 1);
     lv_scr_load(scr_gen);
+    player_init();
+    xTaskCreatePinnedToCore(upload_task, "upload", 16384, NULL, 1, &s_bg_task, 0);
 }
 
 static void goto_play(lv_event_t *e)
 {
     (void)e;
     ESP_LOGI(TAG, "-> play");
+    player_stop();
     lv_label_set_text(play_name, cur_song);
-    lv_bar_set_value(play_bar, 25, LV_ANIM_OFF);
+    lv_label_set_text(play_status, g_play_url[0] ? "下载中..." : "无歌曲");
+    lv_label_set_text(play_btn_label, LV_SYMBOL_PAUSE "  暂停");
+    lv_bar_set_value(play_bar, 0, LV_ANIM_OFF);
+    lv_label_set_text(play_time_cur, "0:00");
+    lv_label_set_text(play_time_tot, "0:00");
     lv_scr_load(scr_play);
+    if (g_play_url[0]) start_playback();
 }
 
 static void fill_hist_list(void)
@@ -498,21 +754,49 @@ static void fill_hist_list(void)
 static void goto_hist(lv_event_t *e)
 {
     (void)e;
+    if (s_bg_task) return;  /* 下载/上传中不允许离开 */
+    player_stop();
     lv_scr_load(scr_hist);
     fill_hist_list();
+}
+
+static void goto_settings(lv_event_t *e)
+{
+    (void)e;
+    const char *cur = network_server_ip();
+    strncpy(set_ip_buf, cur, sizeof(set_ip_buf) - 1);
+    set_ip_buf[sizeof(set_ip_buf) - 1] = 0;
+    if (set_ip_label) lv_label_set_text(set_ip_label, set_ip_buf);
+    lv_scr_load(scr_settings);
+}
+
+/* ===================== 启动状态显示 ===================== */
+void __attribute__((noinline, optimize("O2"))) ui_show_boot_msg(const char *msg)
+{
+    ensure_fonts_ready();
+    lv_obj_t *scr = lv_scr_act();
+    set_bg(scr, C_BG);
+    lv_obj_set_style_pad_all(scr, 0, 0);
+    lv_obj_clean(scr);
+    lv_obj_t *label = lv_label_create(scr);
+    lv_label_set_text(label, msg);
+    lv_obj_set_style_text_font(label, f22, 0);
+    lv_obj_set_style_text_color(label, C_GREEN, 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(label);
 }
 
 /* ===================== 入口 ===================== */
 void ui_create(void)
 {
-    /* 中文符号回退到 montserrat_14(LVGL 内置,含 FontAwesome 符号) */
-    lv_font_zh_16.fallback = &lv_font_montserrat_14;
-    lv_font_zh_22.fallback = &lv_font_montserrat_14;
+    /* 启动状态页可能先于正式 UI 使用字体。 */
+    ensure_fonts_ready();
 
     create_menu();
     create_record();
     create_gen();
     create_play();
     create_hist();
+    create_settings();
     lv_scr_load(scr_menu);
 }

@@ -16,19 +16,17 @@ __pycache__/
 .pytest_cache/
 
 # ===== PlatformIO / ESP32 build =====
-esp32_firmware/.pio/
 .pio/
-esp32_firmware/build_err.txt
-esp32_firmware/build_log.txt
-esp32_firmware/upload_out.txt
-# Vendored upstream LVGL v8.4 source (160MB, re-downloadable).
-# Restore: download https://github.com/lvgl/lvgl/archive/refs/tags/v8.4.0.zip
-# and extract so it lives at esp32_firmware/lib/lvgl-release-v8.4/
-esp32_firmware/lib/lvgl-release-v8.4/
+esp32_firmware_idf55/.pio/
+esp32_diagnostics/.pio/
+
+# ===== ESP32 firmware releases (large binaries) =====
+esp32_firmware_idf55/releases/
 
 # ===== Runtime outputs / logs =====
 logs/*.log
 logs/*.log.*
+logs/*.txt
 static/uploads/*
 !static/uploads/.gitkeep
 static/outputs/*

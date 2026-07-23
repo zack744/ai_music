@@ -73,9 +73,9 @@ class FunMusicClient:
             "is_instrumental": self.is_instrumental,
         }
 
-    def text_to_music(self, prompt: str, duration_sec: int = 30, lyrics: str = "") -> Path:
-        """duration_sec 是 UI 期望值，fun-music 实际生成时长由模型决定（通常 ~200s）。
-        lyrics 非空且 is_instrumental=False 时，传 lyrics（prompt 被忽略）。"""
+    def text_to_music(self, prompt: str, duration_sec: int = 90, lyrics: str = "") -> Path:
+        """duration_sec 是 UI 期望值。fun-music API 无硬时长字段，时长主要由歌词长度决定
+        （上游 LLM 已约束短歌词，目标约 60–90s）。lyrics 非空且非纯音乐时传 lyrics。"""
         if self.mode == "mock":
             return self._mock_generate(prompt, duration_sec)
         return self._real_generate(prompt, duration_sec, lyrics)

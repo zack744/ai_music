@@ -47,9 +47,11 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024  # 上传 40MB（可能两路音频）
 
 UPLOAD_DIR = Path(__file__).parent / "static" / "uploads"
+ESP32_UPLOAD_DIR = UPLOAD_DIR / "esp32"
 SAMPLES_DIR = Path(__file__).parent / "audio_samples"
 OUTPUTS_DIR = Path(__file__).parent / "static" / "outputs"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+ESP32_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ===== 云端理解流水线 =====================================================
@@ -132,10 +134,39 @@ def api_history():
     return jsonify({"songs": songs})
 
 
+@app.get("/api/uploads")
+def api_uploads():
+    """列出 uploads/ 下的音频文件，区分浏览器和 ESP32 来源。"""
+    def _list_dir(directory):
+        files = []
+        for p in sorted(directory.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if not p.is_file():
+                continue
+            if p.name == ".gitkeep":
+                continue
+            st = p.stat()
+            rel = "/uploads/" + p.relative_to(UPLOAD_DIR).as_posix()
+            files.append({
+                "name": p.name,
+                "url": rel,
+                "size": st.st_size,
+                "created": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        return files
+    return jsonify({
+        "browser": _list_dir(UPLOAD_DIR),
+        "esp32": _list_dir(ESP32_UPLOAD_DIR),
+    })
+
+
 @app.post("/api/generate/pipeline")
 def api_generate_pipeline():
     """云端理解流水线：环境音 + (语音|文字) -> 理解 -> 歌词/风格 -> 音乐。"""
-    duration = int(request.form.get("duration_sec") or 30)
+    # 期望时长：默认 90s。两端 API 均无硬时长字段，实际由短歌词/风格提示间接控制
+    duration = max(30, min(int(request.form.get("duration_sec") or 90), 90))
+    source = (request.form.get("source") or "").strip()
+    is_esp32 = source == "esp32"
+    save_dir = ESP32_UPLOAD_DIR if is_esp32 else UPLOAD_DIR
     env_file = request.files.get("env_audio")
     env_sample = (request.form.get("env_sample") or "").strip()
     speech_file = request.files.get("speech_audio")
@@ -144,7 +175,7 @@ def api_generate_pipeline():
     # 解析环境音：上传文件优先，否则用内置素材
     env_path = None
     if env_file and env_file.filename:
-        env_path = UPLOAD_DIR / _safe_name(env_file.filename)
+        env_path = save_dir / _safe_name(env_file.filename)
         env_file.save(env_path)
     elif env_sample:
         p = SAMPLES_DIR / (env_sample + ".mp3")
@@ -156,7 +187,7 @@ def api_generate_pipeline():
     # 解析"想说的话"：语音优先，没有语音则必须给文字
     speech_path = None
     if speech_file and speech_file.filename:
-        speech_path = UPLOAD_DIR / _safe_name(speech_file.filename)
+        speech_path = save_dir / _safe_name(speech_file.filename)
         speech_file.save(speech_path)
     if speech_path is None and not user_text:
         return jsonify({"error": "想说的话不能为空（上传语音或输入文字）"}), 400

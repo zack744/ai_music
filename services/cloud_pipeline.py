@@ -70,7 +70,7 @@ class CloudPipeline:
         env_audio_path: Path,
         speech_audio_path: Optional[Path] = None,
         user_text: Optional[str] = None,
-        duration_sec: int = 30,
+        duration_sec: int = 90,
     ) -> dict:
         steps = {}
         pipeline_start = time.time()

@@ -62,12 +62,25 @@
       <textarea id="pipe-text" placeholder="直接输入想说的话（不录语音时填这里），如：今天考试没考好，有点难过。"></textarea>
 
       <label>生成时长 (秒)</label>
-      <input type="number" id="pipe-duration" value="30" min="5" max="120">
+      <input type="number" id="pipe-duration" value="90" min="30" max="90" title="期望时长(秒)，API无硬控，靠短歌词间接控制，上限90">
       <p><button type="submit" class="s2">运行流水线</button></p>
     </form>
     <div id="pipe-result"></div>
     <pre id="out-pipe">（完整 JSON 在这里）</pre>
     <div id="player-pipe"></div>
+  </div>
+
+  <!-- ============ 上传文件 ============ -->
+  <div class="panel">
+    <h2>上传录音文件</h2>
+    <div class="sub">区分浏览器上传和 ESP32 上传的录音文件</div>
+    <button type="button" onclick="loadUploads()" style="margin-bottom:12px">刷新</button>
+
+    <h2 style="margin-top:16px;color:#2563eb">浏览器上传</h2>
+    <div id="uploads-browser" class="muted">加载中...</div>
+
+    <h2 style="margin-top:16px;color:#16a34a">ESP32 上传</h2>
+    <div id="uploads-esp32" class="muted">加载中...</div>
   </div>
 
 <script>
@@ -198,6 +211,34 @@ document.getElementById("form-pipe").addEventListener("submit", async (e) => {
   result.innerHTML = html;
   if (j.output_url) player.innerHTML = '<audio controls src="' + j.output_url + '"></audio>';
 });
+
+// ---------- 上传文件列表 ----------
+function renderFiles(files) {
+  if (!files.length) return '<span class="muted">暂无文件</span>';
+  return files.map(f => {
+    const kb = (f.size / 1024).toFixed(1);
+    return '<div style="margin-bottom:10px;padding:8px;background:#f8fafc;border-radius:4px">'
+      + '<b>' + f.name + '</b> <span class="muted">' + f.created + ' · ' + kb + ' KB</span>'
+      + '<audio controls preload="none" src="' + f.url + '" style="margin-top:4px"></audio>'
+      + '</div>';
+  }).join("");
+}
+
+async function loadUploads() {
+  const elB = document.getElementById("uploads-browser");
+  const elE = document.getElementById("uploads-esp32");
+  elB.textContent = "加载中..."; elE.textContent = "加载中...";
+  try {
+    const data = await fetch("/api/uploads").then(r => r.json());
+    elB.innerHTML = renderFiles(data.browser || []);
+    elE.innerHTML = renderFiles(data.esp32 || []);
+  } catch(e) {
+    elB.innerHTML = '<span style="color:#991b1b">加载失败: ' + e + '</span>';
+    elE.innerHTML = '<span style="color:#991b1b">加载失败: ' + e + '</span>';
+  }
+}
+loadUploads();
+setInterval(loadUploads, 10000);
 </script>
 </body>
 </html>

@@ -55,8 +55,8 @@ class MiniMaxMusicClient:
             "model": self.model,
         }
 
-    def text_to_music(self, prompt: str, duration_sec: int = 30, lyrics: str = "") -> Path:
-        """duration_sec 是 UI 期望值，MiniMax 实际生成固定 ~183s。
+    def text_to_music(self, prompt: str, duration_sec: int = 90, lyrics: str = "") -> Path:
+        """duration_sec 是期望时长（秒）。官方 API 无硬时长字段，靠短歌词 + prompt 提示间接控长。
         lyrics 非空且 is_instrumental=False 时，MiniMax 会演唱歌词。"""
         if self.mode == "mock":
             return self._mock_generate(prompt, duration_sec)
@@ -82,13 +82,18 @@ class MiniMaxMusicClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        # 官方 schema 无 duration 字段；用 prompt 软提示 + 短歌词间接控到约 90s
+        target_sec = max(30, min(int(duration_sec or 90), 90))
+        music_prompt = (prompt or "").strip()
+        if "second" not in music_prompt.lower() and "秒" not in music_prompt:
+            music_prompt = f"{music_prompt}, about {target_sec} seconds".strip(", ")
         payload = {
             "model": self.model,
             "is_instrumental": self.is_instrumental,
-            "prompt": prompt,
+            "prompt": music_prompt,
             "audio_setting": {
                 "sample_rate": 44100,
-                "bitrate": 256000,
+                "bitrate": 128000,  # 更小体积，便于 ESP32 整首下载
                 "format": "mp3",
             },
             "output_format": "url",  # 返 OSS URL，避免 base64 大字段
@@ -96,8 +101,9 @@ class MiniMaxMusicClient:
         # 有人声模式且提供了歌词 -> 传给 MiniMax 演唱
         if not self.is_instrumental and lyrics:
             payload["lyrics"] = lyrics
-        logger.info("MiniMax API 调用 | model=%s instrumental=%s lyrics=%s prompt=%s",
-                     self.model, self.is_instrumental, "有" if lyrics else "无", prompt[:100])
+        logger.info("MiniMax API 调用 | model=%s instrumental=%s target~%ss lyrics=%s prompt=%s",
+                     self.model, self.is_instrumental, target_sec,
+                     "有" if lyrics else "无", music_prompt[:100])
         resp = requests.post(url, headers=headers, json=payload, timeout=180)
         if resp.status_code != 200:
             logger.error("MiniMax API 失败 | status=%s body=%s", resp.status_code, resp.text[:300])

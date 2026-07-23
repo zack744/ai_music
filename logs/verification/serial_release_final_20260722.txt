@@ -1,0 +1,37 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x2b (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4037b1d6
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x10cc
+load:0x403c8700,len:0xc2c
+load:0x403cb700,len:0x30c0
+entry 0x403c88b8
+
+
+======== ai_music boot ========
+[boot] init WiFi (before LVGL)
+[net] autoConnect... (saved server=192.168.50.246)
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: asus
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+[   921][W][STA.cpp:145] _onStaArduinoEvent(): Reason: 2 - AUTH_EXPIRE
+*wm:AutoConnect: SUCCESS 
+*wm:STA IP Address: 192.168.50.65
+[net] WiFi connected, IP=192.168.50.65, server=192.168.50.246
+[boot] init board
+[I][Panel][esp_panel_board.cpp:0235](init): Board initialize success
+[I][Panel][esp_panel_board.cpp:0253](begin): Beginning board (Viewe:UEDX24320028E-WB-A)
+[I][Panel][esp_lcd_gc9a01.c:0061](esp_lcd_new_panel_gc9a01): version: 2.0.0
+[I][Panel][esp_lcd_touch_chsc6540.c:0048](esp_lcd_touch_new_i2c_chsc6540): version: 0.0.1
+[I][Panel][esp_panel_board.cpp:0463](begin): Board begin success
+[boot] init LVGL
+[I][LvPort][lvgl_v8_port.cpp:0793](lvgl_port_init): Initializing LVGL display driver
+[boot] WiFi OK
+IP:192.168.50.65
+Server:192.168.50.246:5000
+[boot] create UI
+[boot] init player
+[play] MAX98357A I2S1 init OK
+[boot] boot done
