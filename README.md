@@ -1,58 +1,111 @@
-# ai_music · 音乐生成流水线 + ESP32
+# ai_music · 云端音乐生成 + ESP32 播放
 
-基于 Flask 的「环境音 + 语音/文字 → 音乐」云端流水线；ESP32-S3 负责录音上传与整首下载播放。
+环境音 + 语音/文字 → 云端理解流水线生成音乐；ESP32-S3 录音上传、整首下载播放。
 
-## 流水线
+**Cloud music pipeline** (env audio + speech/text → generated track) with an **ESP32-S3** client for record/upload and full-file download playback.
 
-1. **采集**：浏览器 / ESP32 录环境音 + 语音（或打字）
-2. **理解环境音**：`qwen3-omni-flash`
-3. **ASR**：`qwen3-asr-flash`（有文字则跳过）
-4. **歌词+风格**：`qwen-plus` → JSON（短歌词，目标 60–90s 成片）
-5. **音乐生成**：默认 `fun-music-v1`，可切 MiniMax
+## 流水线 / Pipeline
 
-## 快速开始
+1. **采集** Capture：浏览器或 ESP32 录环境音 + 语音（或打字）
+2. **环境音理解** Env understanding：`qwen3-omni-flash`
+3. **ASR**：`qwen3-asr-flash`（已有文字则跳过）
+4. **歌词 + 风格** Lyrics/style：`qwen-plus` → JSON（短歌词，目标约 60–90s）
+5. **音乐生成** Music：默认 `fun-music-v1`，可热切换 MiniMax / Mock
+
+## 快速开始 / Quick start
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
+# 编辑 .env：填入 DASHSCOPE_API_KEY（及可选 MINIMAX_API_KEY）
 python app.py   # http://localhost:5000
 ```
 
-real 模式见 `.env.example`：`PIPELINE_MODE=real`、`PIPELINE_MUSIC_MODE=real`、`DASHSCOPE_API_KEY=...`。
+- Real 云端：`.env` 中 `PIPELINE_MODE=real`、`PIPELINE_MUSIC_MODE=real`，并配置 API Key  
+- ESP32 需要完整下载 URL 时设置 `BASE_URL=http://<你的电脑局域网IP>:5000`  
+- **切勿提交 `.env`**（已在 `.gitignore`）
 
-ESP32 访问时设 `BASE_URL=http://<本机局域网IP>:5000`。
+## Web 控制台
 
-## API
+页面顺序：日志监控 → 历史歌曲 → 上传录音 → 流水线。
+
+- 日志仅展示生成过程（过滤 health/轮询），可清空  
+- 历史/上传可删除  
+- 热切换：`funmusic` / `minimax`、纯音乐、Mock（`POST /api/pipeline/music-backend`，不改 `.env`）  
+- 成片命名：`funmusic-YYYYMMDD-HHMMSS.mp3` 等  
+
+## API（摘要）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET  | `/api/pipeline/health` | 健康检查 |
-| POST | `/api/generate/pipeline` | 完整流水线 |
-| GET  | `/api/history` | 已生成曲目列表 |
-| GET  | `/api/samples` | 内置素材 |
-| GET  | `/api/uploads` | 上传文件列表 |
+| GET | `/api/pipeline/health` | 健康检查 |
+| POST | `/api/generate/pipeline` | 完整流水线（multipart / form） |
+| GET | `/api/history` | 成片列表 |
+| DELETE | `/api/history/<file>` | 删成片 |
+| GET/DELETE | `/api/logs` | 生成日志 |
+| GET/POST | `/api/pipeline/music-backend` | 查/改音乐后端与 mock |
+| GET | `/outputs/<file>.mp3` | 成片下载（ESP32 播放） |
 
-流水线 form：`env_audio` 或 `env_sample` + `speech_audio` 或 `user_text` + `duration_sec`(30–90，默认90) + 可选 `source=esp32`。
+流水线字段：`env_audio` 或 `env_sample` + `speech_audio` 或 `user_text` + 可选 `duration_sec`(30–90) + `source=esp32`。
+
+## ESP32 固件
+
+- **唯一正式工程**：`esp32_firmware_idf55/`（pioarduino / IDF 5.5）  
+- 板卡示例：VIEWE UEDX24320028E-WB-A（ESP32-S3-N16R8）  
+- 接线：`docs/wiring_guide.md`  
+- 迁移与坑：`esp32_firmware_idf55/HANDOFF_IDF55.md`  
+- 进展：`PROJECT_STATUS.md`  
+
+通信（本版）：HTTP 明文，`{server_ip}:5000`（NVS 存 IP，端口写死 5000）。
+
+| 动作 | 路径 |
+|------|------|
+| 上传生成 | `POST /api/generate/pipeline`（`source=esp32`） |
+| 历史 | `GET /api/history` |
+| 播放 | `GET /outputs/<mp3>` |
+
+播放：**整首下载到 PSRAM → MP3 → I2S**；流式代码保留但默认关闭。  
+配网 AP：`AI-Music-Setup`（WiFiManager）。
+
+### 构建烧录（示例）
+
+```powershell
+cd esp32_firmware_idf55
+# 按本机 PlatformIO 路径与串口修改
+$env:PLATFORMIO_CORE_DIR = 'D:\platformio_diag'   # 可选
+& 'C:\Users\PC\.platformio\penv\Scripts\pio.exe' run -e BOARD_VIEWE_UEDX24320028E_WB_A -t upload --upload-port COMx
+```
+
+### 近期固件要点
+
+- 触摸：CHSC6540 raw 线性校准（`TOUCH_CAL_*` in `config.h`；`TOUCH_CALIB_LOG=1` 可采点）  
+- 返回停播：`player_stop_async()` — UI 不堵，后台持锁释放；保留 SoftAudio I2S 软停 + mutex  
+- 历史列表后台拉取，避免 LVGL 线程阻塞  
 
 ## 时长说明
 
-Fun-Music / MiniMax **均无硬时长参数**。项目通过短歌词（LLM 约束）与 MiniMax prompt 软提示尽量落在约 90 秒内，便于 ESP32 整首下载。**不截断音频**，保持成片完整。
+Fun-Music / MiniMax **无硬时长参数**。靠短歌词与 prompt 软提示落在约 90s 内，便于 ESP32 整首缓存。**不截断音频**。
 
-## ESP32
+## 安全 / Security
 
-- 固件：`esp32_firmware_idf55/`（IDF 5.5）
-- 接线：`docs/wiring_guide.md`
-- 交接：`esp32_firmware_idf55/HANDOFF_IDF55.md`
-- 播放：**仅下载播放**；流式代码保留但搁置
+- API Key 只放在本地 `.env`，参考 `.env.example`  
+- 不要把局域网 IP、WiFi 名称、串口日志中的真实环境信息当密钥泄露；公开仓库中的示例已用占位符  
+- 公网部署勿用 Vercel 跑本 Flask（长超时 + 本地磁盘）；需长运行主机并设好 `BASE_URL`  
 
 ## 目录
 
 ```
-app.py / services/          编排与云端客户端
-templates/index.html        Web 面板
-esp32_firmware_idf55/       正式固件
-docs/wiring_guide.md        接线
-PROJECT_STATUS.md           进展与待办
+app.py / services/           Flask 编排与云端客户端
+templates/index.html         Web 控制台
+static/uploads|outputs/      录音 / 成片（运行时生成，不入库）
+esp32_firmware_idf55/        ★ 正式固件
+docs/wiring_guide.md         功放 / 麦克风接线
+PROJECT_STATUS.md            状态与待办
+.env.example                 环境变量模板
 ```
+
+## License
+
+见 `LICENSE`。

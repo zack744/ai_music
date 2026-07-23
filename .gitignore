@@ -26,7 +26,8 @@ esp32_firmware_idf55/releases/
 # ===== Runtime outputs / logs =====
 logs/*.log
 logs/*.log.*
-logs/*.txt
+logs/**/*.log
+logs/**/*.txt
 static/uploads/*
 !static/uploads/.gitkeep
 static/outputs/*

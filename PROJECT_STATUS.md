@@ -2,7 +2,7 @@
 
 > **最近更新：2026-07-23**  
 > 目标：环境音 + 语音/文字 → 云端流水线生成音乐；ESP32 录音上传 + 整首下载播放。  
-> 当前阶段：**局域网开发测试**；公网演示方案已讨论，固件暂不改，后续再动。
+> 当前阶段：**局域网开发测试**；公网演示方案已讨论，固件暂不改 HTTPS/域名，后续再动。
 
 ---
 
@@ -105,12 +105,13 @@ Flask (app.py)  ──编排──► CloudPipeline
 - 新文件：`funmusic-YYYYMMDD-HHMMSS.mp3` / `minimax-...` / `*-mock-...`
 - 旧 `funmusic_时间戳.mp3` 仍可播
 
-### 播放器固件修复（已烧录验证 boot）
+### 播放器 / 触控固件（已烧录）
 
 - 软停 I2S（返回不 `uninstall`）
 - 历史列表后台拉取
 - 单曲下载上限 6MB
-- 增益略降；返回路径顺序修正
+- 触摸四角校准：`TOUCH_CAL_*`（`config.h`）；可选 `TOUCH_CALIB_LOG`
+- 返回停播：`player_stop_async`（UI 不堵，后台 free；保留 mutex）
 
 ---
 
@@ -198,10 +199,10 @@ esp32_firmware_idf55/HANDOFF_IDF55.md
 # 固件（完整工程）
 cd esp32_firmware_idf55
 $env:PLATFORMIO_CORE_DIR = 'D:\platformio_diag'
-& 'C:\Users\PC\.platformio\penv\Scripts\pio.exe' run -e BOARD_VIEWE_UEDX24320028E_WB_A -t upload --upload-port COM8
+& 'C:\Users\PC\.platformio\penv\Scripts\pio.exe' run -e BOARD_VIEWE_UEDX24320028E_WB_A -t upload --upload-port COMx
 ```
 
-联调默认：Flask `192.168.50.246:5000`，ESP32 约 `192.168.50.65`，串口 **COM8**，波特率 **115200**。
+联调示例：Flask `http://<PC_LAN_IP>:5000`，ESP32 填同一网段 server_ip，串口以设备管理器为准（如 COMx），波特率 **115200**。
 
 ---
 

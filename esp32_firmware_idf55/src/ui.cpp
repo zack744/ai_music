@@ -669,7 +669,7 @@ static void goto_menu(lv_event_t *e)
 {
     (void)e;
     if (rec_recording || s_bg_task) return;  /* 录音/上传/下载中不允许返回 */
-    player_stop();
+    player_stop_async();
     rec_recording = false;
     if (rec_start_label) lv_label_set_text(rec_start_label, LV_SYMBOL_PLAY "  开始");
     lv_scr_load(scr_menu);
@@ -700,7 +700,8 @@ static void goto_play(lv_event_t *e)
 {
     (void)e;
     ESP_LOGI(TAG, "-> play");
-    player_stop();
+    /* play 在后台任务里会 player_stop() 同步等待异步清理完成 */
+    player_stop_async();
     lv_label_set_text(play_name, cur_song);
     lv_label_set_text(play_status, g_play_url[0] ? "下载中..." : "无歌曲");
     lv_label_set_text(play_btn_label, LV_SYMBOL_PAUSE "  暂停");
@@ -780,7 +781,7 @@ static void goto_hist(lv_event_t *e)
 {
     (void)e;
     if (s_bg_task) return;  /* 下载/上传/拉历史中不允许离开 */
-    player_stop();
+    player_stop_async();  /* 不堵 UI：停声+后台 free，mutex/软停仍在 */
     lv_obj_clean(hist_list);
     lv_list_add_text(hist_list, "加载中...");
     lv_scr_load(scr_hist);

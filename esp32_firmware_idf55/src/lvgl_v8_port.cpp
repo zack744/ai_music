@@ -12,6 +12,7 @@
 #define ESP_UTILS_LOG_TAG "LvPort"
 #include "esp_lib_utils.h"
 #include "lvgl_v8_port.h"
+#include "config.h"
 
 using namespace esp_panel::drivers;
 
@@ -660,17 +661,36 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
     if (read_touch_result > 0) {
         int x = (int)point.x;
         int y = (int)point.y;
+#if TOUCH_CALIB_LOG
+        /* 校准模式：放宽过滤，只丢 0xFFF 类无效值；串口打 raw+mapped（约 200ms 一次） */
+        if (x > 0 && x < 4000 && y > 0 && y < 4000) {
+            int sx = (x - TOUCH_CAL_X0) * 239 / TOUCH_CAL_XSPAN;
+            int sy = (y - TOUCH_CAL_Y0) * 319 / TOUCH_CAL_YSPAN + TOUCH_CAL_Y_BIAS;
+            if (sx < 0) sx = 0; if (sx > 239) sx = 239;
+            if (sy < 0) sy = 0; if (sy > 319) sy = 319;
+            static int64_t s_last_log_us = 0;
+            int64_t now = esp_timer_get_time();
+            if (now - s_last_log_us > 200000) {
+                s_last_log_us = now;
+                ESP_LOGI("TouchCal", "raw=(%d,%d) -> map=(%d,%d)", x, y, sx, sy);
+            }
+            data->point.x = sx;
+            data->point.y = sy;
+            data->state = LV_INDEV_STATE_PRESSED;
+        }
+#else
         /* 过滤 CHSC6540 无效读数(4095=0xFFF 等超屏值),避免打乱 LVGL 状态机 */
         if (x >= 0 && x < 240 && y >= 0 && y < 320) {
             /* 四角校准:触摸面板 raw 坐标范围与 LCD 不一致,线性映射到屏幕坐标 */
-            int sx = (x - 32) * 239 / 180;
-            int sy = (y - 35) * 319 / 265 + 10;  // +10 向下补偿(校准偏上)
+            int sx = (x - TOUCH_CAL_X0) * 239 / TOUCH_CAL_XSPAN;
+            int sy = (y - TOUCH_CAL_Y0) * 319 / TOUCH_CAL_YSPAN + TOUCH_CAL_Y_BIAS;
             if (sx < 0) sx = 0; if (sx > 239) sx = 239;
             if (sy < 0) sy = 0; if (sy > 319) sy = 319;
             data->point.x = sx;
             data->point.y = sy;
             data->state = LV_INDEV_STATE_PRESSED;
         }
+#endif
     }
 }
 

@@ -23,7 +23,7 @@
 /* 临时/现场播放器自检；正式固件保持 0，需要时改成 1。 */
 #define PLAYER_BOOT_SELF_TEST 0
 #define PLAYER_BOOT_SELF_TEST_STREAM 0
-#define PLAYER_BOOT_SELF_TEST_URL "http://192.168.50.246:5000/outputs/compare_funmusic_vocals.mp3"
+#define PLAYER_BOOT_SELF_TEST_URL "http://192.168.1.100:5000/outputs/compare_funmusic_vocals.mp3"
 
 /* 流式播放（已搁置，勿改默认）：产品路径只用整首下载 */
 #define STREAM_BUFFER_SIZE        (64 * 1024)
@@ -33,6 +33,27 @@
 
 /* 录音自检：开机自动录 3 秒并打印 PCM 统计 */
 #define RECORDER_BOOT_SELF_TEST 0
+
+/* ---- 触摸校准（CHSC6540 raw → 240x320 逻辑坐标）----
+ * 默认 TOUCH_CALIB_LOG=0：行为与原先完全一致，只是常数集中到这里。
+ * 校准步骤：
+ *   1) 设 TOUCH_CALIB_LOG=1，烧录，串口 115200 看 [TouchCal]
+ *   2) 尽量贴边点 左上/右上/左下/右下，记录 raw_x/raw_y
+ *   3) 令 x_min=最左 raw, x_max=最右, y_min=最上, y_max=最下
+ *      TOUCH_CAL_X0 = x_min
+ *      TOUCH_CAL_XSPAN = x_max - x_min
+ *      TOUCH_CAL_Y0 = y_min
+ *      TOUCH_CAL_YSPAN = y_max - y_min
+ *      TOUCH_CAL_Y_BIAS 先 0，若整体偏上/下再微调
+ *   4) 改完常数后把 TOUCH_CALIB_LOG 改回 0 再烧正式固件
+ */
+#define TOUCH_CALIB_LOG   0
+/* 2026-07-23 四角实测: TL(23,19) TR(224,17) BL(22,315) BR(223,316) */
+#define TOUCH_CAL_X0      22
+#define TOUCH_CAL_XSPAN   202
+#define TOUCH_CAL_Y0      17
+#define TOUCH_CAL_YSPAN   299
+#define TOUCH_CAL_Y_BIAS  0
 
 
 

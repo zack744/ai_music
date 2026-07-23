@@ -35,8 +35,14 @@ bool player_play(const char *url, player_download_cb_t dl_cb);
  * 返回 true=已开始播放。 */
 bool player_play_stream(const char *url);
 
-/* 停止播放并释放缓冲 */
+/* 停止播放并释放缓冲（同步；player_play 前会调用） */
 void player_stop(void);
+
+/* UI 用：立刻停声并异步释放缓冲，不堵 LVGL 点击路径。mutex+软停 I2S 仍保留 */
+void player_stop_async(void);
+
+/* 是否仍有异步 stop 任务在跑（含 free 大缓冲） */
+bool player_stop_busy(void);
 
 /* 暂停 / 恢复 (暂停时解码挂起, 恢复后继续, 不重新下载) */
 void player_pause(void);

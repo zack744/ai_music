@@ -85,8 +85,11 @@ static unsigned long s_pause_begin = 0;   /* 本次暂停开始时刻 */
 static int s_duration_ms = 0;             /* 估算总时长 */
 
 static SemaphoreHandle_t s_mutex = NULL;
+static TaskHandle_t s_stop_task = NULL;
 
 static void player_stop_stream_internals(void);
+static void player_wait_stop_task(void);
+static uint8_t *player_halt_and_detach_buf(void);
 
 bool player_init(void)
 {
@@ -321,22 +324,78 @@ static void player_stop_stream_internals(void)
     if (s_stream_buf_mem) { free(s_stream_buf_mem); s_stream_buf_mem = NULL; }
 }
 
-void player_stop(void)
+/* 须持 s_mutex：停解码、摘掉缓冲指针；大块 free 在锁外做，缩短持锁时间 */
+static uint8_t *player_halt_and_detach_buf(void)
 {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
-    /* 先标记 idle，避免 stop 过程中 loop 继续喂解码器 */
     s_state = PLAYER_IDLE;
     s_source_mode = PLAYER_SOURCE_MEMORY;
     if (s_mp3 && s_mp3->isRunning()) {
         s_mp3->stop(); /* SoftAudioOutputI2S::stop 不清卸载 I2S */
     }
     if (s_file) { delete s_file; s_file = NULL; }
-    if (s_mp3_buf) { free(s_mp3_buf); s_mp3_buf = NULL; s_mp3_size = 0; }
+    uint8_t *to_free = s_mp3_buf;
+    s_mp3_buf = NULL;
+    s_mp3_size = 0;
     player_stop_stream_internals();
     s_duration_ms = 0;
     s_start_ms = 0;
     s_pause_accum = 0;
+    return to_free;
+}
+
+static void player_wait_stop_task(void)
+{
+    while (s_stop_task != NULL) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+static void player_stop_task(void *arg)
+{
+    (void)arg;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    uint8_t *to_free = player_halt_and_detach_buf();
     if (s_mutex) xSemaphoreGive(s_mutex);
+    if (to_free) free(to_free);
+    s_stop_task = NULL;
+    vTaskDelete(NULL);
+}
+
+void player_stop(void)
+{
+    if (!s_inited) player_init();
+    player_wait_stop_task();
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    uint8_t *to_free = player_halt_and_detach_buf();
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    if (to_free) free(to_free);
+}
+
+void player_stop_async(void)
+{
+    if (!s_inited) player_init();
+    /* 尽快停声：短超时拿锁停解码；拿不到也置 IDLE，loop 下一轮会停 */
+    if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(30))) {
+        s_state = PLAYER_IDLE;
+        if (s_mp3 && s_mp3->isRunning()) {
+            s_mp3->stop();
+        }
+        xSemaphoreGive(s_mutex);
+    } else {
+        s_state = PLAYER_IDLE;
+    }
+    if (s_stop_task != NULL) return;
+    BaseType_t ok = xTaskCreatePinnedToCore(
+        player_stop_task, "pstop", 4096, NULL, 2, &s_stop_task, 0);
+    if (ok != pdPASS) {
+        s_stop_task = NULL;
+        player_stop();
+    }
+}
+
+bool player_stop_busy(void)
+{
+    return s_stop_task != NULL;
 }
 
 void player_pause(void)

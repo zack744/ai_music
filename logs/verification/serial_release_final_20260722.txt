@@ -12,14 +12,13 @@ entry 0x403c88b8
 
 ======== ai_music boot ========
 [boot] init WiFi (before LVGL)
-[net] autoConnect... (saved server=192.168.50.246)
+[net] autoConnect... (saved server=192.168.x.x)
 *wm:AutoConnect 
-*wm:Connecting to SAVED AP: asus
+*wm:Connecting to SAVED AP: <redacted>
 *wm:connectTimeout not set, ESP waitForConnectResult... 
-[   921][W][STA.cpp:145] _onStaArduinoEvent(): Reason: 2 - AUTH_EXPIRE
 *wm:AutoConnect: SUCCESS 
-*wm:STA IP Address: 192.168.50.65
-[net] WiFi connected, IP=192.168.50.65, server=192.168.50.246
+*wm:STA IP Address: 192.168.x.y
+[net] WiFi connected, IP=192.168.x.y, server=192.168.x.x
 [boot] init board
 [I][Panel][esp_panel_board.cpp:0235](init): Board initialize success
 [I][Panel][esp_panel_board.cpp:0253](begin): Beginning board (Viewe:UEDX24320028E-WB-A)
@@ -29,8 +28,8 @@ entry 0x403c88b8
 [boot] init LVGL
 [I][LvPort][lvgl_v8_port.cpp:0793](lvgl_port_init): Initializing LVGL display driver
 [boot] WiFi OK
-IP:192.168.50.65
-Server:192.168.50.246:5000
+IP:192.168.x.y
+Server:192.168.x.x:5000
 [boot] create UI
 [boot] init player
 [play] MAX98357A I2S1 init OK

@@ -1,10 +1,9 @@
 # ai_music ESP32 固件迁移交接文档（IDF 5.5）
 
-> 更新时间：2026-07-22 (清理后)  
+> 更新时间：2026-07-23  
 > 板卡：VIEWE UEDX24320028E-WB-A / ESP32-S3-N16R8  
-> 串口：COM8  
-> WiFi：`asus`，设备 IP `192.168.50.65`  
-> Flask：`http://192.168.50.246:5000`
+> 串口：本机设备管理器中的 COMx（示例常用 COM8）  
+> WiFi / 设备 IP / Flask：局域网自配（示例 `192.168.x.x:5000`，勿提交真实内网拓扑）
 
 ---
 
@@ -124,7 +123,7 @@ shutil.which("platformio.exe")
 | 阶段 | 内容 | 结果 |
 |---|---|---|
 | A | 2MB PSRAM，8轮全量写入/读回 | PASS，0 error |
-| B0 | 连接 WiFi `asus` | PASS |
+| B0 | 连接 WiFi `<wifi-ssid>` | PASS |
 | B1 | WiFi 在线时，2MB PSRAM 12轮写入/读回 | PASS，0 error |
 | C1 | HTTP 下载 602419 bytes 到内部 SRAM sink | PASS |
 | C2 | HTTP 4KB SRAM 中转并复制到 PSRAM | PASS，checksum `fc99e7f4` |
@@ -182,7 +181,7 @@ $env:PLATFORMIO_CORE_DIR='D:\platformio_diag'
 $env:PATH='C:\Users\PC\.platformio\penv\Scripts;' + $env:PATH
 & 'C:\Users\PC\.platformio\penv\Scripts\pio.exe' run `
   -e BOARD_VIEWE_UEDX24320028E_WB_A `
-  -t upload --upload-port COM8
+  -t upload --upload-port COMx
 ```
 
 ---
@@ -248,7 +247,7 @@ ensure_fonts_ready();
 
 ```text
 [boot] init WiFi (before LVGL)
-[net] WiFi connected, IP=192.168.50.65
+[net] WiFi connected, IP=192.168.x.y
 [boot] init board
 Board begin success
 [boot] init LVGL
@@ -267,7 +266,7 @@ logs/serial_migration_fontlazy_20260722.txt
 播放器自检日志：
 
 ```text
-[play] downloading http://192.168.50.246:5000/outputs/compare_funmusic_vocals.mp3
+[play] downloading http://192.168.x.x:5000/outputs/compare_funmusic_vocals.mp3
 [play] allocating 602419 bytes in PSRAM
 [play] downloaded 602419 bytes
 [play] mp3 bitrate 128 kbps -> duration ~37651 ms
@@ -366,7 +365,7 @@ AudioOutputI2S(I2S1)
 cd D:\project\ai_music\esp32_firmware_idf55
 $env:PLATFORMIO_CORE_DIR='D:\platformio_diag'
 $env:PATH='C:\Users\PC\.platformio\penv\Scripts;' + $env:PATH
-& 'C:\Users\PC\.platformio\penv\Scripts\pio.exe' run -e BOARD_VIEWE_UEDX24320028E_WB_A -t upload --upload-port COM8
+& 'C:\Users\PC\.platformio\penv\Scripts\pio.exe' run -e BOARD_VIEWE_UEDX24320028E_WB_A -t upload --upload-port COMx
 ```
 
 ---
