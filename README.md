@@ -24,7 +24,9 @@ python app.py   # http://localhost:5000
 ```
 
 - Real 云端：`.env` 中 `PIPELINE_MODE=real`、`PIPELINE_MUSIC_MODE=real`，并配置 API Key  
-- ESP32 需要完整下载 URL 时设置 `BASE_URL=http://<你的电脑局域网IP>:5000`  
+- ESP32 下载成片：局域网设 `BASE_URL=http://<本机IP>:5000`；公网设 `BASE_URL=https://你的域名` 或 `http://公网IP:端口`（须与固件 Host/Port/HTTPS 一致）  
+- **简易鉴权（公网推荐）**：设 `SITE_PASSWORD`；浏览器登录；设备请求头 `X-API-Key`（默认与密码相同，可用 `API_ACCESS_KEY` 单独设）。留空则关闭鉴权。  
+- 生产（Linux）：`gunicorn -b 127.0.0.1:5000 -w 1 --timeout 360 "app:app"`，前面用 Nginx 反代（超时 ≥360s，body ≥40m）  
 - **切勿提交 `.env`**（已在 `.gitignore`）
 
 ## Web 控制台
@@ -58,16 +60,17 @@ python app.py   # http://localhost:5000
 - 迁移与坑：`esp32_firmware_idf55/HANDOFF_IDF55.md`  
 - 进展：`PROJECT_STATUS.md`  
 
-通信（本版）：HTTP 明文，`{server_ip}:5000`（NVS 存 IP，端口写死 5000）。
+通信：可配 **Host（IP/域名）+ Port + HTTPS**（NVS；WiFiManager 门户与屏上 Settings）。  
+局域网默认 `http://IP:5000`；公网推荐 `https://域名:443`。上传等响应最长约 **360s**。
 
 | 动作 | 路径 |
 |------|------|
 | 上传生成 | `POST /api/generate/pipeline`（`source=esp32`） |
 | 历史 | `GET /api/history` |
-| 播放 | `GET /outputs/<mp3>` |
+| 播放 | `GET /outputs/<mp3>`（或响应里的完整 `output_url`） |
 
-播放：**整首下载到 PSRAM → MP3 → I2S**；流式代码保留但默认关闭。  
-配网 AP：`AI-Music-Setup`（WiFiManager）。
+播放：**整首下载到 PSRAM → MP3 → I2S**（支持 http/https）；流式代码保留但默认关闭。  
+配网 AP：`AI-Music-Setup`（可填 Backend Host / Port / HTTPS）。
 
 ### 构建烧录（示例）
 

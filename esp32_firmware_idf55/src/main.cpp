@@ -74,11 +74,12 @@ void setup()
 
     lvgl_port_lock(-1);
     if (wifi_ok && WiFi.status() == WL_CONNECTED) {
-        const char *sip = network_server_ip();
-        char msg[160];
-        if (sip && sip[0]) {
-            snprintf(msg, sizeof(msg), "WiFi OK\nIP:%s\nServer:%s:5000",
-                     WiFi.localIP().toString().c_str(), sip);
+        char ep[96];
+        network_endpoint_summary(ep, sizeof(ep));
+        char msg[200];
+        if (network_server_host()[0]) {
+            snprintf(msg, sizeof(msg), "WiFi OK\nIP:%s\n%s",
+                     WiFi.localIP().toString().c_str(), ep);
         } else {
             snprintf(msg, sizeof(msg), "WiFi OK\nIP:%s\nServer: not set\nTap Settings(gear)",
                      WiFi.localIP().toString().c_str());

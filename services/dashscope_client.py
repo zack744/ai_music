@@ -39,14 +39,16 @@ _AUDIO_UNDERSTAND_PROMPT = (
 _LYRICS_SYSTEM = (
     "你是一位专业的词曲创作助手。根据给定的「环境场景描述」和「用户想说的话」，"
     "创作一段短歌词，并给出一句用于音乐生成的风格描述"
-    "（包含曲风、速度BPM、主要乐器、情绪）。"
+    "（包含曲风、速度BPM、主要乐器、情绪），再给一个英文歌名。"
     "硬性要求：整首歌目标时长约 60–90 秒；歌词务必精短——"
     "【主歌】2–4 行、【副歌】2–4 行，总字数（中文）控制在 80 字以内，不要桥段/outro。"
     "只输出 JSON，不要输出任何解释性文字。"
     "JSON 字段：lyrics(字符串，含【主歌】【副歌】标记)、"
     "music_style(字符串，一句话风格描述，尽量用英文以便音乐模型理解；"
     "结尾可带 about 90 seconds)、"
-    "mood(字符串)。"
+    "mood(字符串)、"
+    "song_title(字符串，英文歌名，2–5 个单词，Title Case；"
+    "仅用 ASCII 字母与空格，不要标点/数字/中文；贴合情绪与场景，例如 Soft Rain Lullaby)。"
 )
 
 
@@ -165,6 +167,7 @@ class DashScopeClient:
                 ),
                 "music_style": "Slow sad piano ballad, soft strings, 70 bpm, melancholic, rain ambient",
                 "mood": "melancholic",
+                "song_title": "Soft Rain Lullaby",
             }
         return self._real_generate(scene_desc, user_text)
 
@@ -195,8 +198,9 @@ class DashScopeClient:
             raise RuntimeError("LLM 调用失败: " + str(resp.code) + " " + str(resp.message))
         content = resp.output.choices[0].message.content
         result = _parse_json_loose(content)
-        logger.info("DashScope LLM 完成 | keys=%s style=%s",
-                     list(result.keys()), result.get("music_style", "")[:80])
+        logger.info("DashScope LLM 完成 | keys=%s style=%s title=%s",
+                     list(result.keys()), result.get("music_style", "")[:80],
+                     result.get("song_title", "")[:40])
         return result
 
 
@@ -232,4 +236,10 @@ def _parse_json_loose(text: str) -> dict:
     try:
         return json.loads(s)
     except Exception:
-        return {"lyrics": text, "music_style": text, "mood": "unknown", "_raw": text}
+        return {
+            "lyrics": text,
+            "music_style": text,
+            "mood": "unknown",
+            "song_title": "Untitled Melody",
+            "_raw": text,
+        }

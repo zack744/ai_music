@@ -2,8 +2,10 @@
 #include "config.h"
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <stdio.h>
+#include <string.h>
 #include "esp_heap_caps.h"
 #include "driver/i2s.h"
 #include "freertos/FreeRTOS.h"
@@ -140,10 +142,22 @@ bool player_play(const char *url, player_download_cb_t dl_cb)
     s_source_mode = PLAYER_SOURCE_MEMORY;
     s_state = PLAYER_DOWNLOADING;
     Serial.printf("[play] downloading %s\n", url);
-    WiFiClient client;
+
+    const bool use_tls = (strncmp(url, "https://", 8) == 0);
+    WiFiClient plain;
+    WiFiClientSecure secure;
     HTTPClient http;
-    http.setTimeout(30000);
-    if (!http.begin(client, url)) {
+    http.setTimeout(60000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    bool begun = false;
+    if (use_tls) {
+        secure.setInsecure();
+        begun = http.begin(secure, url);
+    } else {
+        begun = http.begin(plain, url);
+    }
+    if (!begun) {
         Serial.println("[play] http.begin failed");
         s_state = PLAYER_ERROR;
         return false;
@@ -177,7 +191,7 @@ bool player_play(const char *url, player_download_cb_t dl_cb)
     WiFiClient *stream = http.getStreamPtr();
     s_mp3_size = 0;
     int last_pct = -1;
-    unsigned long deadline = millis() + 60000;
+    unsigned long deadline = millis() + 120000UL;
 
     /*
      * 关键：不要让 lwIP/NetworkClient 直接把 TCP 数据写入 PSRAM。

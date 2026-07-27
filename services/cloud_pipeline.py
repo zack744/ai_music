@@ -5,7 +5,7 @@
 
   环境音   --(qwen3-omni-flash)-->  场景 / 情绪 / 节奏描述
   用户语音 --(qwen3-asr-flash)-->  文字        （或用户直接给文字，跳过 ASR）
-  场景 + 文字 --(qwen-plus)-->     歌词 + 音乐风格(JSON)
+  场景 + 文字 --(qwen-plus)-->     歌词 + 音乐风格 + 英文歌名(JSON)
   音乐风格   --(音乐后端)-->        最终音乐
 
 音乐后端是「可插拔」的：只要实现 text_to_music(prompt, duration_sec) -> Path
@@ -13,7 +13,9 @@
 ACE-Step / YuE / MusicGen 等其它后端，且其 mock/remote 模式由
 PIPELINE_MUSIC_MODE 控制。
 """
+import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -21,6 +23,8 @@ from typing import Optional
 from .dashscope_client import DashScopeClient
 
 logger = logging.getLogger("pipeline")
+
+_SONG_TITLE_RE = re.compile(r"[^A-Za-z\s]+")
 
 
 def build_music_backend(name: str, api_key: str = "", mode: str = "mock", **kwargs):
@@ -115,12 +119,15 @@ class CloudPipeline:
         t0 = time.time()
         ls = self.ds.generate_lyrics_and_style(scene, asr_text)
         elapsed_3 = time.time() - t0
-        logger.info("[3/4] 完成 | 耗时=%.2fs | style=%s | mood=%s",
-                     elapsed_3, _truncate(ls.get("music_style", ""), 100), ls.get("mood", "?"))
+        song_title = sanitize_song_title(ls.get("song_title", ""))
+        logger.info("[3/4] 完成 | 耗时=%.2fs | style=%s | mood=%s | title=%s",
+                     elapsed_3, _truncate(ls.get("music_style", ""), 100),
+                     ls.get("mood", "?"), song_title)
         logger.info("[3/4] 歌词预览:\n%s", _truncate(ls.get("lyrics", ""), 300))
         steps["3_lyrics_and_style"] = {
             "model": self.ds.llm_model,
             "result": ls,
+            "song_title": song_title,
             "elapsed_sec": round(elapsed_3, 2),
         }
 
@@ -136,11 +143,13 @@ class CloudPipeline:
         logger.info("[4/4] 完成 | 耗时=%.2fs | 输出=%s (%s bytes)",
                      elapsed_4, out_path.name, out_path.stat().st_size if out_path.exists() else "?")
         output_url = make_output_url(self.base_url, out_path.name)
+        write_song_meta(out_path, song_title, mood=ls.get("mood", ""))
         steps["4_music_generation"] = {
             "backend": self.music_backend_name,
             "mode": getattr(self.music, "mode", "?"),
             "prompt": music_prompt,
             "output_url": output_url,
+            "song_title": song_title,
             "elapsed_sec": round(elapsed_4, 2),
         }
 
@@ -156,9 +165,50 @@ class CloudPipeline:
             "final_prompt": music_prompt,
             "lyrics": ls.get("lyrics", ""),
             "music_style": music_prompt,
+            "song_title": song_title,
             "output_url": output_url,
             "total_elapsed_sec": round(total, 2),
         }
+
+
+def sanitize_song_title(raw: str, max_words: int = 5, max_len: int = 40) -> str:
+    """清洗为 ESP32 友好的英文歌名：仅 A-Z/空格，Title Case，短词。"""
+    text = str(raw or "").replace("\n", " ").strip()
+    text = _SONG_TITLE_RE.sub(" ", text)
+    words = [w for w in text.split() if w]
+    if not words:
+        return "Untitled Melody"
+    words = words[:max_words]
+    title = " ".join(w[:1].upper() + w[1:].lower() for w in words)
+    if len(title) > max_len:
+        title = title[:max_len].rsplit(" ", 1)[0].strip() or title[:max_len]
+    return title or "Untitled Melody"
+
+
+def write_song_meta(audio_path: Path, song_title: str, mood: str = "") -> None:
+    """成片旁写 .meta.json，供历史列表显示 song_title。"""
+    try:
+        meta_path = audio_path.with_suffix(audio_path.suffix + ".meta.json")
+        payload = {
+            "song_title": song_title,
+            "file": audio_path.name,
+            "mood": mood or "",
+        }
+        meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("写歌曲 meta 失败 | file=%s err=%s", audio_path.name, e)
+
+
+def read_song_title(audio_path: Path) -> str:
+    """从 sidecar meta 读歌名；没有则空串。"""
+    meta_path = audio_path.with_suffix(audio_path.suffix + ".meta.json")
+    if not meta_path.is_file():
+        return ""
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        return sanitize_song_title(data.get("song_title", ""))
+    except Exception:
+        return ""
 
 
 def _truncate(text: str, max_len: int = 100) -> str:

@@ -12,11 +12,13 @@ extern "C" {
  * user_text               : 文字输入 (可为 NULL, 此时用 speech_wav)
  * duration_sec            : 期望音乐时长
  * out_url                 : 接收 output_url 的缓冲区 (至少 256 字节)
+ * out_title / out_title_size: 可选，接收 song_title（英文歌名）；可为 NULL
  * 返回 true=成功, false=失败 */
 bool uploader_upload(const uint8_t *env_wav, size_t env_size,
                      const uint8_t *speech_wav, size_t speech_size,
                      const char *user_text, int duration_sec,
-                     char *out_url, size_t out_url_size);
+                     char *out_url, size_t out_url_size,
+                     char *out_title, size_t out_title_size);
 
 #ifdef __cplusplus
 }

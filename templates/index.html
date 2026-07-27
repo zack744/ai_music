@@ -2,64 +2,117 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>ai_music · 音乐生成流水线</title>
   <style>
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
     body { font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif;
-           max-width: 1080px; margin: 24px auto; padding: 0 20px; color: #222; }
-    h1 { font-size: 22px; margin-bottom: 4px; }
+           max-width: 1080px; margin: 24px auto; padding: 0 20px; color: #222;
+           overflow-x: hidden; }
+    h1 { font-size: 22px; margin-bottom: 4px; word-break: break-word; }
     h2 { margin: 0 0 4px; font-size: 16px; }
     .panel { border: 1px solid #e2e2e2; border-radius: 8px; padding: 18px; margin-bottom: 18px; }
     .panel.s2 { border-left: 4px solid #16a34a; }
     .panel.log { border-left: 4px solid #2563eb; }
     .panel.hist { border-left: 4px solid #7c3aed; }
-    .panel .sub { color: #888; font-size: 12px; margin-bottom: 12px; }
+    .panel .sub { color: #888; font-size: 12px; margin-bottom: 12px; word-break: break-word; }
     label { display: block; margin: 8px 0 4px; font-size: 13px; color: #666; }
     input[type=text], input[type=number], textarea, select {
-      width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; box-sizing: border-box; }
+      width: 100%; max-width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px;
+      font: inherit; box-sizing: border-box; font-size: 16px; }
+    input[type=file] { max-width: 100%; font-size: 14px; }
     textarea { height: 70px; resize: vertical; }
     button { background: #2563eb; color: white; border: 0; padding: 8px 16px;
-             border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 6px; }
+             border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 6px;
+             min-height: 36px; touch-action: manipulation; }
     button.s2 { background: #16a34a; }
     button:disabled { background: #9ca3af; cursor: not-allowed; }
     button.rec { background: #dc2626; }
     button.ghost { background: #64748b; }
     pre { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 4px;
-          overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+          overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word;
+          max-width: 100%; -webkit-overflow-scrolling: touch; }
     pre#log-view {
       height: 360px; margin: 0; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-      line-height: 1.45; white-space: pre; word-break: normal;
+      line-height: 1.45; white-space: pre; word-break: normal; overflow-x: auto;
     }
     pre#log-view .ln-err { color: #fca5a5; }
     pre#log-view .ln-warn { color: #fcd34d; }
     pre#log-view .ln-step { color: #86efac; }
     pre#log-view .ln-api { color: #93c5fd; }
-    audio { width: 100%; margin-top: 8px; }
+    audio { width: 100%; max-width: 100%; margin-top: 8px; }
     .status { padding: 6px 10px; border-radius: 4px; font-size: 13px;
-              display: inline-block; margin-bottom: 12px; }
+              display: inline-block; margin-bottom: 12px; max-width: 100%;
+              word-break: break-word; }
     .status.ok { background: #dcfce7; color: #166534; }
     .status.err { background: #fee2e2; color: #991b1b; }
     .step { margin: 8px 0; padding: 8px 10px; background: #f8fafc; border-radius: 4px; font-size: 13px; }
     .step b { color: #334155; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    .row > * { flex: 1 1 auto; }
+    .row > * { flex: 1 1 auto; min-width: 0; }
     .muted { color: #999; font-size: 12px; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-    .toolbar .meta { color: #64748b; font-size: 12px; margin-left: auto; }
+    .toolbar .meta { color: #64748b; font-size: 12px; margin-left: auto; word-break: break-word; }
     .song-item {
       margin-bottom: 10px; padding: 10px 12px; background: #f8fafc;
       border-radius: 6px; border: 1px solid #eef2f7;
     }
     .song-item .head { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
-    .song-item .title { font-weight: 600; font-size: 14px; word-break: break-all; flex: 1; }
+    .song-item .title { font-weight: 600; font-size: 14px; word-break: break-all; flex: 1; min-width: 0; }
     .song-item .meta { color: #64748b; font-size: 12px; margin-top: 2px; }
-    button.del { background: #dc2626; padding: 4px 10px; font-size: 12px; margin: 0; flex-shrink: 0; }
+    button.del { background: #dc2626; padding: 4px 10px; font-size: 12px; margin: 0; flex-shrink: 0; min-height: 32px; }
     button.del:hover { background: #b91c1c; }
-    #hist-list { max-height: 480px; overflow: auto; }
+    button.copy-url { background: #7c3aed; padding: 4px 10px; font-size: 12px; margin: 0; flex-shrink: 0; min-height: 32px; }
+    button.copy-url:hover { background: #6d28d9; }
+    button.copy-url.ok { background: #16a34a; }
+    .song-item .actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
+    #hist-list { max-height: 480px; overflow: auto; -webkit-overflow-scrolling: touch; }
+
+    @media (max-width: 720px) {
+      body { margin: 12px auto; padding: 0 12px 24px; }
+      h1 { font-size: 18px; }
+      h2 { font-size: 15px; }
+      .panel { padding: 14px 12px; margin-bottom: 14px; border-radius: 10px; }
+      .panel .sub { font-size: 11px; line-height: 1.45; }
+      .toolbar { gap: 8px 10px; align-items: stretch; }
+      .toolbar .meta { margin-left: 0; width: 100%; line-height: 1.4; }
+      .toolbar label { width: 100%; }
+      .toolbar select, .toolbar button { width: auto; }
+      pre#log-view { height: min(42vh, 280px); font-size: 11px; }
+      #hist-list { max-height: min(50vh, 360px); }
+      .row { flex-direction: column; align-items: stretch; gap: 8px; }
+      .row > * { width: 100%; flex: none; }
+      .row button { width: 100%; margin-right: 0; }
+      .row input[type=file], .row select { width: 100%; }
+      .song-item .head { flex-direction: column; gap: 8px; }
+      .song-item .actions { width: 100%; }
+      .song-item .actions button { flex: 1; }
+      button { margin-right: 0; margin-bottom: 4px; }
+      button.s2, #form-pipe button[type=submit] { width: 100%; }
+      .status { display: block; }
+      #out-pipe { font-size: 11px; }
+    }
+
+    @media (max-width: 400px) {
+      body { padding: 0 10px 20px; }
+      h1 { font-size: 16px; }
+      pre#log-view { height: min(38vh, 240px); }
+    }
   </style>
 </head>
 <body>
-  <h1>🎵 ai_music · 音乐生成流水线</h1>
-  <p class="muted">环境音理解 → 语音识别 → LLM 创作歌词/风格 → 音乐生成（funmusic / minimax）</p>
+  <div class="row" style="align-items:flex-start;margin-bottom:8px">
+    <div style="flex:1">
+      <h1 style="margin-top:0">🎵 ai_music · 音乐生成流水线</h1>
+      <p class="muted" style="margin:0">环境音理解 → 语音识别 → LLM 创作歌词/风格 → 音乐生成（funmusic / minimax）</p>
+    </div>
+    {% if auth_enabled %}
+    <form method="post" action="{{ url_for('logout') }}" style="margin:0;flex:0 0 auto">
+      <button type="submit" class="ghost" style="margin:0">退出登录</button>
+    </form>
+    {% endif %}
+  </div>
 
   <!-- ============ 1. 日志监控 ============ -->
   <div class="panel log">
@@ -353,6 +406,31 @@ async function deleteHistory(name) {
   loadLogs(true);
 }
 
+async function copySongUrl(btn) {
+  // 仅给网页访客用：按当前打开页面的 origin 拼下载链；与 ESP32 的 BASE_URL 无关
+  const name = btn.getAttribute("data-name") || "";
+  const full = location.origin + "/outputs/" + encodeURIComponent(name);
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(full);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = full;
+      ta.style.cssText = "position:fixed;left:-9999px;top:0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    const old = btn.textContent;
+    btn.textContent = "已复制";
+    btn.classList.add("ok");
+    setTimeout(() => { btn.textContent = old; btn.classList.remove("ok"); }, 1500);
+  } catch (e) {
+    prompt("复制失败，请手动复制：", full);
+  }
+}
+
 let lastHistSig = "";
 async function loadHistory(force) {
   const el = document.getElementById("hist-list");
@@ -362,7 +440,7 @@ async function loadHistory(force) {
   try {
     const data = await fetch("/api/history").then(r => r.json());
     const songs = data.songs || [];
-    const sig = songs.map(s => s.name + ":" + s.size).join("|");
+    const sig = songs.map(s => (s.file || s.name) + ":" + s.size).join("|");
     meta.textContent = songs.length + " 首";
     if (!force && sig === lastHistSig && el.dataset.ready) return;
     lastHistSig = sig;
@@ -371,18 +449,27 @@ async function loadHistory(force) {
       el.innerHTML = '<span class="muted">暂无生成歌曲</span>';
       return;
     }
-    el.innerHTML = songs.map(s =>
-      '<div class="song-item">'
+    el.innerHTML = songs.map(s => {
+      const file = s.file || s.name;
+      const title = s.song_title || s.name || file;
+      const sub = (s.song_title && file !== title) ? (' · ' + escHtml(file)) : '';
+      return '<div class="song-item">'
       + '<div class="head">'
-      +   '<div class="title">' + escHtml(s.name) + '</div>'
-      +   '<button type="button" class="del" data-name="' + escHtml(s.name) + '">删除</button>'
+      +   '<div class="title">' + escHtml(title) + '</div>'
+      +   '<div class="actions">'
+      +     '<button type="button" class="copy-url" data-name="' + escHtml(file) + '">复制URL</button>'
+      +     '<button type="button" class="del" data-name="' + escHtml(file) + '">删除</button>'
+      +   '</div>'
       + '</div>'
-      + '<div class="meta">' + escHtml(s.created || "") + " · " + fmtSize(s.size || 0) + '</div>'
+      + '<div class="meta">' + escHtml(s.created || "") + " · " + fmtSize(s.size || 0) + sub + '</div>'
       + '<audio controls preload="none" src="' + escHtml(s.url) + '"></audio>'
-      + '</div>'
-    ).join("");
+      + '</div>';
+    }).join("");
     el.querySelectorAll("button.del").forEach(btn => {
       btn.addEventListener("click", () => deleteHistory(btn.getAttribute("data-name")));
+    });
+    el.querySelectorAll("button.copy-url").forEach(btn => {
+      btn.addEventListener("click", () => copySongUrl(btn));
     });
   } catch (e) {
     el.innerHTML = '<span style="color:#991b1b">加载失败: ' + escHtml(String(e)) + '</span>';
@@ -468,7 +555,10 @@ document.getElementById("form-pipe").addEventListener("submit", async (e) => {
          + escHtml(s["2_asr"].text) + '</div>';
   if (s["3_lyrics_and_style"] && s["3_lyrics_and_style"].result) {
     const ls = s["3_lyrics_and_style"].result;
-    html += '<div class="step"><b>③ 歌词</b><br><pre style="background:#0f172a">' + escHtml(ls.lyrics || "") + '</pre>'
+    const title = j.song_title || s["3_lyrics_and_style"].song_title || ls.song_title || "";
+    html += '<div class="step"><b>③ 歌词</b>'
+         + (title ? (' · <b>歌名</b> ' + escHtml(title)) : '')
+         + '<br><pre style="background:#0f172a">' + escHtml(ls.lyrics || "") + '</pre>'
          + '<b>音乐风格</b><br>' + escHtml(ls.music_style || "") + '</div>';
   }
   if (s["4_music_generation"])
@@ -477,7 +567,10 @@ document.getElementById("form-pipe").addEventListener("submit", async (e) => {
          + (s["4_music_generation"].elapsed_sec != null ? s["4_music_generation"].elapsed_sec + "s" : "")
          + '<br><b>最终 prompt:</b> ' + escHtml(s["4_music_generation"].prompt) + '</div>';
   result.innerHTML = html;
-  if (j.output_url) player.innerHTML = '<audio controls src="' + j.output_url + '"></audio>';
+  if (j.output_url) {
+    const t = j.song_title ? ('<div class="meta" style="margin-bottom:6px"><b>' + escHtml(j.song_title) + '</b></div>') : '';
+    player.innerHTML = t + '<audio controls src="' + j.output_url + '"></audio>';
+  }
 });
 
 // ---------- 上传文件列表 ----------

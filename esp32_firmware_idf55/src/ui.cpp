@@ -1,6 +1,8 @@
 #include "ui.h"
 #include "esp_log.h"
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <ArduinoJson.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -75,10 +77,10 @@ static lv_timer_t *gen_timer = NULL;
 static lv_obj_t *play_name, *play_bar, *play_btn_label = NULL;
 static lv_obj_t *play_status, *play_time_cur, *play_time_tot = NULL;
 
-/* ---- 演示数据 ---- */
-static const char *cur_song = "Midnight Drift";
+/* ---- 当前播放歌名（可写缓冲，避免 const 字面量） ---- */
+static char cur_song[64] = "Midnight Drift";
 #define MAX_HIST 20
-static struct { char name[64]; char url[128]; } g_hist[MAX_HIST];
+static struct { char name[64]; char url[256]; } g_hist[MAX_HIST];
 static int g_hist_count = 0;
 static lv_obj_t *hist_list = NULL;
 
@@ -88,6 +90,7 @@ static size_t g_env_size = 0;
 static uint8_t *g_speech_wav = NULL;
 static size_t g_speech_size = 0;
 static char g_output_url[300] = {0};
+static char g_song_title[64] = {0};
 static bool g_gen_ok = false;
 static TaskHandle_t s_bg_task = NULL;
 
@@ -95,14 +98,36 @@ static TaskHandle_t s_bg_task = NULL;
 static char g_play_url[320] = {0};
 
 /* ---- 设置页运行时 ---- */
-static lv_obj_t *set_ip_label = NULL;
-static char set_ip_buf[40] = {0};
-static const char *numpad_map[] = {
+static lv_obj_t *set_host_label = NULL;
+static lv_obj_t *set_meta_label = NULL;
+static lv_obj_t *set_kb = NULL;
+static char set_host_buf[64] = {0};
+static char set_port_buf[8] = {0};
+static bool set_tls = false;
+static int set_kb_mode = 0; /* 0=host 字母 1=host 数字 2=port */
+static const char *set_kb_host_az[] = {
+    "a", "b", "c", "d", "e", "f", "\n",
+    "g", "h", "i", "j", "k", "l", "\n",
+    "m", "n", "o", "p", "q", "r", "\n",
+    "s", "t", "u", "v", "w", "x", "\n",
+    "y", "z", ".", "-", "123", LV_SYMBOL_BACKSPACE, "\n",
+    "Port", "TLS", "WiFi", "\n",
+    "Save", "Back", ""
+};
+static const char *set_kb_host_num[] = {
+    "1", "2", "3", "4", "5", "\n",
+    "6", "7", "8", "9", "0", "\n",
+    ".", "-", "abc", LV_SYMBOL_BACKSPACE, "\n",
+    "Port", "TLS", "WiFi", "\n",
+    "Save", "Back", ""
+};
+static const char *set_kb_port[] = {
     "1", "2", "3", "\n",
     "4", "5", "6", "\n",
     "7", "8", "9", "\n",
-    ".", "0", LV_SYMBOL_BACKSPACE, "\n",
-    "Save", "Back", ""
+    "443", "0", "5000", "\n",
+    LV_SYMBOL_BACKSPACE, "Host", "TLS", "\n",
+    "WiFi", "Save", "Back", ""
 };
 
 /* ---- 前置声明 ---- */
@@ -336,7 +361,12 @@ static void gen_finish_cb(lv_event_t *e)
     if (g_gen_ok) {
         strncpy(g_play_url, g_output_url, sizeof(g_play_url) - 1);
         g_play_url[sizeof(g_play_url) - 1] = 0;
-        cur_song = "New Song";
+        if (g_song_title[0]) {
+            strncpy(cur_song, g_song_title, sizeof(cur_song) - 1);
+        } else {
+            strncpy(cur_song, "New Song", sizeof(cur_song) - 1);
+        }
+        cur_song[sizeof(cur_song) - 1] = 0;
         goto_play(e);
     } else {
         goto_menu(e);
@@ -345,9 +375,11 @@ static void gen_finish_cb(lv_event_t *e)
 
 static void upload_task(void *arg)
 {
+    g_song_title[0] = 0;
     bool ok = uploader_upload(g_env_wav, g_env_size,
                               g_speech_wav, g_speech_size,
-                              NULL, 30, g_output_url, sizeof(g_output_url));
+                              NULL, 30, g_output_url, sizeof(g_output_url),
+                              g_song_title, sizeof(g_song_title));
     lvgl_port_lock(-1);
     g_gen_ok = ok;
     lv_label_set_text(gen_status, ok ? "已生成" : "生成失败");
@@ -550,14 +582,11 @@ static void hist_item_cb(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx >= 0 && idx < g_hist_count) {
-        cur_song = g_hist[idx].name;
-        /* 后端可能返回相对路径(/outputs/x.mp3), 补成绝对 URL */
-        const char *u = g_hist[idx].url;
-        if (u[0] == '/') {
-            snprintf(g_play_url, sizeof(g_play_url), "http://%s:5000%s",
-                     network_server_ip(), u);
-        } else {
-            strncpy(g_play_url, u, sizeof(g_play_url) - 1);
+        strncpy(cur_song, g_hist[idx].name, sizeof(cur_song) - 1);
+        cur_song[sizeof(cur_song) - 1] = 0;
+        /* 相对路径用当前 host/port/tls 拼绝对 URL；已是 http(s) 则原样 */
+        if (!network_resolve_url(g_play_url, sizeof(g_play_url), g_hist[idx].url)) {
+            strncpy(g_play_url, g_hist[idx].url, sizeof(g_play_url) - 1);
             g_play_url[sizeof(g_play_url) - 1] = 0;
         }
     }
@@ -591,7 +620,42 @@ static void create_hist(void)
 }
 
 /* ===================== 设置页 ===================== */
-static void set_numpad_cb(lv_event_t *e)
+static void set_refresh_labels(void)
+{
+    if (set_host_label) {
+        lv_label_set_text(set_host_label, set_host_buf[0] ? set_host_buf : "(empty)");
+    }
+    if (set_meta_label) {
+        char meta[48];
+        snprintf(meta, sizeof(meta), "%s  :%s",
+                 set_tls ? "HTTPS" : "HTTP",
+                 set_port_buf[0] ? set_port_buf : "?");
+        lv_label_set_text(set_meta_label, meta);
+    }
+}
+
+static void set_apply_kb_map(void)
+{
+    if (!set_kb) return;
+    if (set_kb_mode == 1) {
+        lv_btnmatrix_set_map(set_kb, set_kb_host_num);
+    } else if (set_kb_mode == 2) {
+        lv_btnmatrix_set_map(set_kb, set_kb_port);
+    } else {
+        lv_btnmatrix_set_map(set_kb, set_kb_host_az);
+    }
+}
+
+static void set_append_to(char *buf, size_t buf_sz, const char *txt)
+{
+    if (!txt || !txt[0]) return;
+    size_t len = strlen(buf);
+    size_t add = strlen(txt);
+    if (len + add >= buf_sz) return;
+    memcpy(buf + len, txt, add + 1);
+}
+
+static void set_kb_cb(lv_event_t *e)
 {
     lv_obj_t *btnm = lv_event_get_target(e);
     uint16_t id = lv_btnmatrix_get_selected_btn(btnm);
@@ -599,27 +663,88 @@ static void set_numpad_cb(lv_event_t *e)
     const char *txt = lv_btnmatrix_get_btn_text(btnm, id);
     if (!txt) return;
 
-    if (strcmp(txt, LV_SYMBOL_BACKSPACE) == 0) {
-        size_t len = strlen(set_ip_buf);
-        if (len > 0) set_ip_buf[len - 1] = 0;
-    } else if (strcmp(txt, "Save") == 0) {
-        if (strlen(set_ip_buf) > 0) {
-            network_set_server_ip(set_ip_buf);
-            ESP_LOGI(TAG, "server IP saved: %s", set_ip_buf);
+    if (strcmp(txt, "Save") == 0) {
+        uint16_t port = (uint16_t)atoi(set_port_buf);
+        if (port == 0) port = set_tls ? 443 : 5000;
+        if (set_host_buf[0]) {
+            network_set_server(set_host_buf, port, set_tls);
+            ESP_LOGI(TAG, "server saved: %s://%s:%u",
+                     set_tls ? "https" : "http", set_host_buf, (unsigned)port);
         }
         goto_menu(e);
         return;
-    } else if (strcmp(txt, "Back") == 0) {
-        goto_menu(e);
-        return;
-    } else {
-        size_t len = strlen(set_ip_buf);
-        if (len < sizeof(set_ip_buf) - 1) {
-            set_ip_buf[len] = txt[0];
-            set_ip_buf[len + 1] = 0;
-        }
     }
-    lv_label_set_text(set_ip_label, set_ip_buf);
+    if (strcmp(txt, "WiFi") == 0) {
+        /* 先保存当前后端配置，再清 WiFi 并重启进配网 */
+        uint16_t port = (uint16_t)atoi(set_port_buf);
+        if (port == 0) port = set_tls ? 443 : 5000;
+        if (set_host_buf[0]) {
+            network_set_server(set_host_buf, port, set_tls);
+        }
+        ESP_LOGW(TAG, "WiFi reconfig requested -> reset + reboot");
+        if (set_host_label) {
+            lv_label_set_text(set_host_label, "Reboot to WiFi setup...");
+        }
+        if (set_meta_label) {
+            lv_label_set_text(set_meta_label, "AP: AI-Music-Setup");
+        }
+        lv_timer_handler();
+        delay(400);
+        network_reset_wifi_and_reboot();
+        return;
+    }
+    if (strcmp(txt, "Back") == 0) {
+        goto_menu(e);
+        return;
+    }
+    if (strcmp(txt, "TLS") == 0) {
+        set_tls = !set_tls;
+        if (set_tls && strcmp(set_port_buf, "5000") == 0) {
+            strncpy(set_port_buf, "443", sizeof(set_port_buf) - 1);
+        } else if (!set_tls && strcmp(set_port_buf, "443") == 0) {
+            strncpy(set_port_buf, "5000", sizeof(set_port_buf) - 1);
+        }
+        set_refresh_labels();
+        return;
+    }
+    if (strcmp(txt, "Port") == 0) {
+        set_kb_mode = 2;
+        set_apply_kb_map();
+        return;
+    }
+    if (strcmp(txt, "Host") == 0 || strcmp(txt, "abc") == 0) {
+        set_kb_mode = 0;
+        set_apply_kb_map();
+        return;
+    }
+    if (strcmp(txt, "123") == 0) {
+        set_kb_mode = 1;
+        set_apply_kb_map();
+        return;
+    }
+    if (strcmp(txt, LV_SYMBOL_BACKSPACE) == 0) {
+        char *buf = (set_kb_mode == 2) ? set_port_buf : set_host_buf;
+        size_t len = strlen(buf);
+        if (len > 0) buf[len - 1] = 0;
+        set_refresh_labels();
+        return;
+    }
+    if (strcmp(txt, "443") == 0 || strcmp(txt, "5000") == 0) {
+        strncpy(set_port_buf, txt, sizeof(set_port_buf) - 1);
+        set_port_buf[sizeof(set_port_buf) - 1] = 0;
+        set_tls = (strcmp(txt, "443") == 0);
+        set_refresh_labels();
+        return;
+    }
+
+    if (set_kb_mode == 2) {
+        if (txt[0] >= '0' && txt[0] <= '9' && txt[1] == 0) {
+            set_append_to(set_port_buf, sizeof(set_port_buf), txt);
+        }
+    } else {
+        set_append_to(set_host_buf, sizeof(set_host_buf), txt);
+    }
+    set_refresh_labels();
 }
 
 static void __attribute__((noinline, optimize("O2"))) create_settings(void)
@@ -628,40 +753,40 @@ static void __attribute__((noinline, optimize("O2"))) create_settings(void)
     set_bg(scr_settings, C_BG);
     lv_obj_set_style_pad_all(scr_settings, 0, 0);
 
-    /* 标题 */
-    lv_obj_t *title = new_label(scr_settings, "Server IP", f22, C_GREEN);
-    lv_obj_set_pos(title, 16, 10);
+    lv_obj_t *title = new_label(scr_settings, "Server", f22, C_GREEN);
+    lv_obj_set_pos(title, 16, 6);
 
-    /* IP 显示框 */
-    lv_obj_t *box = new_box(scr_settings, 208, 44);
-    lv_obj_set_pos(box, 16, 42);
+    set_meta_label = new_label(scr_settings, "HTTP  :5000", f16, C_TEXT_GG);
+    lv_obj_set_pos(set_meta_label, 16, 34);
+
+    lv_obj_t *box = new_box(scr_settings, 208, 36);
+    lv_obj_set_pos(box, 16, 54);
     lv_obj_set_style_border_width(box, 1, 0);
     lv_obj_set_style_border_color(box, C_GREEN, 0);
     lv_obj_set_style_radius(box, 8, 0);
-    set_ip_label = new_label(box, "", f22, C_TEXT_LT);
-    lv_obj_align(set_ip_label, LV_ALIGN_LEFT_MID, 8, 0);
+    set_host_label = new_label(box, "", f16, C_TEXT_LT);
+    lv_label_set_long_mode(set_host_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(set_host_label, 192);
+    lv_obj_align(set_host_label, LV_ALIGN_LEFT_MID, 8, 0);
 
-    /* 数字键盘 */
-    lv_obj_t *btnm = lv_btnmatrix_create(scr_settings);
-    lv_obj_set_size(btnm, 208, 210);
-    lv_obj_set_pos(btnm, 16, 96);
-    lv_btnmatrix_set_map(btnm, numpad_map);
-    lv_btnmatrix_set_btn_width(btnm, 12, 2);  /* Save 宽 2 */
-    lv_btnmatrix_set_btn_width(btnm, 13, 2);  /* Back 宽 2 */
-    lv_obj_add_event_cb(btnm, set_numpad_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    set_kb = lv_btnmatrix_create(scr_settings);
+    lv_obj_set_size(set_kb, 208, 214);
+    lv_obj_set_pos(set_kb, 16, 98);
+    set_kb_mode = 0;
+    lv_btnmatrix_set_map(set_kb, set_kb_host_az);
+    lv_obj_add_event_cb(set_kb, set_kb_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-    /* 键盘样式 */
-    lv_obj_set_style_bg_opa(btnm, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(btnm, 0, 0);
-    lv_obj_set_style_pad_all(btnm, 0, 0);
-    lv_obj_set_style_pad_gap(btnm, 4, 0);
-    lv_obj_set_style_bg_color(btnm, C_CARD, LV_PART_ITEMS);
-    lv_obj_set_style_bg_opa(btnm, LV_OPA_COVER, LV_PART_ITEMS);
-    lv_obj_set_style_text_color(btnm, C_GREEN, LV_PART_ITEMS);
-    lv_obj_set_style_text_font(btnm, f22, LV_PART_ITEMS);
-    lv_obj_set_style_border_width(btnm, 0, LV_PART_ITEMS);
-    lv_obj_set_style_radius(btnm, 8, LV_PART_ITEMS);
-    lv_obj_set_style_shadow_width(btnm, 0, LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(set_kb, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(set_kb, 0, 0);
+    lv_obj_set_style_pad_all(set_kb, 0, 0);
+    lv_obj_set_style_pad_gap(set_kb, 3, 0);
+    lv_obj_set_style_bg_color(set_kb, C_CARD, LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(set_kb, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(set_kb, C_GREEN, LV_PART_ITEMS);
+    lv_obj_set_style_text_font(set_kb, f16, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(set_kb, 0, LV_PART_ITEMS);
+    lv_obj_set_style_radius(set_kb, 6, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_width(set_kb, 0, LV_PART_ITEMS);
 }
 
 /* ===================== 页面跳转 ===================== */
@@ -756,9 +881,9 @@ static void hist_fetch_task(void *arg)
                 const char *url = song["url"];
                 if (!name || !url) continue;
                 strncpy(g_hist[count].name, name, 63);
-                strncpy(g_hist[count].url, url, 127);
+                strncpy(g_hist[count].url, url, sizeof(g_hist[count].url) - 1);
                 g_hist[count].name[63] = 0;
-                g_hist[count].url[127] = 0;
+                g_hist[count].url[sizeof(g_hist[count].url) - 1] = 0;
                 count++;
             }
         }
@@ -791,10 +916,14 @@ static void goto_hist(lv_event_t *e)
 static void goto_settings(lv_event_t *e)
 {
     (void)e;
-    const char *cur = network_server_ip();
-    strncpy(set_ip_buf, cur, sizeof(set_ip_buf) - 1);
-    set_ip_buf[sizeof(set_ip_buf) - 1] = 0;
-    if (set_ip_label) lv_label_set_text(set_ip_label, set_ip_buf);
+    const char *cur = network_server_host();
+    strncpy(set_host_buf, cur ? cur : "", sizeof(set_host_buf) - 1);
+    set_host_buf[sizeof(set_host_buf) - 1] = 0;
+    snprintf(set_port_buf, sizeof(set_port_buf), "%u", (unsigned)network_server_port());
+    set_tls = network_server_tls();
+    set_kb_mode = 0;
+    set_apply_kb_map();
+    set_refresh_labels();
     lv_scr_load(scr_settings);
 }
 

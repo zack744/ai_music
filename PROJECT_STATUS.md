@@ -126,6 +126,9 @@ Flask (app.py)  ──编排──► CloudPipeline
 | `PIPELINE_MUSIC_BACKEND` | funmusic / minimax |
 | `PIPELINE_MUSIC_IS_INSTRUMENTAL` | 纯音乐 |
 | `BASE_URL` | 返回完整 `output_url` 前缀；ESP32 公网时必设正确 |
+| `SITE_PASSWORD` | 网页登录密码；空=关闭鉴权 |
+| `API_ACCESS_KEY` | 设备 `X-API-Key`；空则同 `SITE_PASSWORD` |
+| `SECRET_KEY` | Session 签名；公网请固定随机串 |
 | `FUNMUSIC_*` / `DS_*_MODEL` | 模型细节 |
 | `MAX_PROMPT_CHARS` | 文字上限 |
 
@@ -133,19 +136,19 @@ Flask (app.py)  ──编排──► CloudPipeline
 
 ---
 
-## 6. 公网演示方案（讨论结论，固件暂不改）
+## 6. 公网演示方案（固件已支持 host/port/TLS）
 
 | 项 | 结论 |
 |----|------|
-| ESP32 连手机热点 | ✅ 可行（WiFiManager 配热点 SSID） |
-| Flask 上公网 + 板子访问 | ✅ 可行；**不必与 Flask 同局域网** |
+| ESP32 连手机热点 | ✅ WiFiManager 配热点 SSID |
+| Flask 上公网 + 板子访问 | ✅ 不必同局域网 |
 | **Vercel 跑本 Flask** | ❌ 不合适（长超时 + 本地磁盘） |
-| Cloudflare 域名 DNS | ✅ 可用 |
-| 简单密码页（无用户库） | ✅ 演示够用；ESP32 API 宜另开 Key 或暂不鉴权 |
-| 本版固件 | 仅 **HTTP + IP（或可解析主机）+ 端口 5000** |
-| 域名 + HTTPS:443 | 需 **后续改固件** |
+| 云主机 + 域名 + HTTPS | ✅ 推荐；Nginx/Caddy 反代，`proxy_read_timeout ≥ 360s`，`client_max_body_size ≥ 40m` |
+| 固件 | **Host（IP/域名）+ Port + HTTPS 开关**；上传等待 **360s**；播放支持 https 下载（`setInsecure`） |
+| `BASE_URL` | 公网必须设为 `https://你的域名`，与板子配置一致 |
 
-推荐宿主：轻量云 / Railway / Render 等长运行+磁盘；演示也可本机 + 端口映射。
+配网：AP `AI-Music-Setup` 填 Backend Host / Port / HTTPS；屏上 Settings 可改 host/port/TLS。  
+局域网回退：Host=`192.168.x.x` Port=`5000` HTTPS=`0`。
 
 ---
 
@@ -159,15 +162,16 @@ Flask (app.py)  ──编排──► CloudPipeline
 
 ### 中期（演示 / 公网）
 
-- [ ] 选定公网宿主并部署；设好 `BASE_URL`
-- [ ] 板子 `server_ip` 填公网 IP；热点配网彩排
+- [ ] 选定公网宿主并部署；设好 `BASE_URL=https://域名`
+- [ ] 反代长超时 + body 限制；手机浏览器先验证流水线
+- [ ] 板子配 Host/Port/HTTPS；热点配网彩排
 - [ ] 网页简单密码（可选）；演示完删实例
 
-### 后期（固件改造）
+### 后期（加固）
 
-- [ ] 支持 host（域名）+ 可配端口
-- [ ] 可选 HTTPS
-- [ ] 上传等待超时与云端生成时长对齐
+- [x] host + 可配端口 + HTTPS（`setInsecure` 演示级）
+- [x] 上传等待 360s
+- [ ] 证书校验 / API Key
 
 ### 搁置
 

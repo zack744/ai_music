@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>登录 · ai_music</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+      min-height: 100vh; margin: 0; display: flex; align-items: center; justify-content: center;
+      background: #f1f5f9; color: #222; padding: 20px;
+    }
+    .card {
+      width: 100%; max-width: 380px; background: #fff; border: 1px solid #e2e8f0;
+      border-radius: 12px; padding: 28px 24px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    }
+    h1 { font-size: 20px; margin: 0 0 6px; }
+    .sub { color: #64748b; font-size: 13px; margin: 0 0 20px; line-height: 1.5; }
+    label { display: block; margin: 0 0 6px; font-size: 13px; color: #64748b; }
+    input[type=password] {
+      width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 6px;
+      font: inherit; font-size: 16px; margin-bottom: 14px;
+    }
+    input[type=password]:focus { outline: 2px solid #93c5fd; border-color: #2563eb; }
+    button {
+      width: 100%; background: #2563eb; color: #fff; border: 0; padding: 10px 16px;
+      border-radius: 6px; cursor: pointer; font-size: 15px; min-height: 42px;
+    }
+    button:hover { background: #1d4ed8; }
+    .err {
+      background: #fee2e2; color: #991b1b; padding: 8px 10px; border-radius: 6px;
+      font-size: 13px; margin-bottom: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>ai_music</h1>
+    <p class="sub">输入访问密码进入控制台。设备可用请求头 <code>X-API-Key</code>。</p>
+    {% if error %}
+    <div class="err">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="{{ url_for('login') }}">
+      <input type="hidden" name="next" value="{{ next or '/' }}">
+      <label for="password">访问密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button type="submit">登录</button>
+    </form>
+  </div>
+</body>
+</html>

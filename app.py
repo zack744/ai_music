@@ -4,24 +4,45 @@ ai_music 后端编排服务（Flask）。
 云端理解流水线（DashScopeClient + CloudPipeline）：
   配置：PIPELINE_MODE / DASHSCOPE_API_KEY / DS_*_MODEL
        PIPELINE_MUSIC_BACKEND / PIPELINE_MUSIC_MODE / MINIMAX_API_KEY
+       SITE_PASSWORD / API_ACCESS_KEY / SECRET_KEY（简易鉴权）
   路由：GET  /api/pipeline/health
        POST /api/generate/pipeline     环境音理解+ASR+歌词+音乐生成
        GET  /api/samples               内置音频素材列表
+       GET/POST /login  POST /logout     简易密码登录
 
 启动：
   pip install -r requirements.txt
   cp .env.example .env
   python app.py
+生产（Linux）：
+  gunicorn -b 127.0.0.1:5000 -w 1 --timeout 360 "app:app"
 """
+import hmac
 import logging
 import os
+import secrets
 from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
 
-from services import CloudPipeline, DashScopeClient, build_music_backend, make_output_url
+from services import (
+    CloudPipeline,
+    DashScopeClient,
+    build_music_backend,
+    make_output_url,
+    read_song_title,
+)
 
 load_dotenv(override=True)
 
@@ -69,6 +90,22 @@ logging.getLogger("werkzeug").addFilter(_QuietPollFilter())
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024  # 上传 40MB（可能两路音频）
+app.config["SECRET_KEY"] = (
+    os.getenv("SECRET_KEY", "").strip()
+    or secrets.token_hex(32)
+)
+# 会话 7 天；公网演示够用
+app.config["PERMANENT_SESSION_LIFETIME"] = 7 * 24 * 3600
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+# 简易鉴权：SITE_PASSWORD 为空则关闭（本地开发）；公网务必设置
+SITE_PASSWORD = (os.getenv("SITE_PASSWORD", "") or "").strip()
+# ESP32 / 脚本用 Header X-API-Key；未单独配置时与 SITE_PASSWORD 相同
+API_ACCESS_KEY = (os.getenv("API_ACCESS_KEY", "") or "").strip() or SITE_PASSWORD
+AUTH_ENABLED = bool(SITE_PASSWORD)
+
+_AUTH_EXEMPT_ENDPOINTS = frozenset({"login", "static"})
 
 UPLOAD_DIR = Path(__file__).parent / "static" / "uploads"
 ESP32_UPLOAD_DIR = UPLOAD_DIR / "esp32"
@@ -219,11 +256,97 @@ _music_runtime["music_mode"] = getattr(pipeline.music, "mode", _music_runtime["m
 pipeline.mode = _music_runtime["pipeline_mode"]
 
 
+# --- 简易鉴权 ------------------------------------------------------------
+
+def _safe_equal(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def _request_api_key() -> str:
+    key = (request.headers.get("X-API-Key") or "").strip()
+    if key:
+        return key
+    auth = (request.headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (request.args.get("api_key") or "").strip()
+
+
+def _auth_ok() -> bool:
+    if not AUTH_ENABLED:
+        return True
+    if session.get("authed") is True:
+        return True
+    return _safe_equal(_request_api_key(), API_ACCESS_KEY)
+
+
+def _wants_json() -> bool:
+    if request.path.startswith("/api/"):
+        return True
+    best = request.accept_mimetypes.best_match(["application/json", "text/html"])
+    return best == "application/json" and (
+        request.accept_mimetypes[best] > request.accept_mimetypes["text/html"]
+    )
+
+
+@app.before_request
+def _require_auth():
+    if not AUTH_ENABLED:
+        return None
+    ep = request.endpoint or ""
+    if ep in _AUTH_EXEMPT_ENDPOINTS or ep.startswith("static"):
+        return None
+    if _auth_ok():
+        return None
+    if _wants_json() or request.path.startswith(("/api/", "/outputs/", "/uploads/")):
+        return jsonify({"error": "未授权，请登录或提供 X-API-Key"}), 401
+    nxt = request.full_path if request.query_string else request.path
+    if nxt.endswith("?"):
+        nxt = nxt[:-1]
+    return redirect(url_for("login", next=nxt))
+
+
 # --- 页面 ----------------------------------------------------------------
 
 @app.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", auth_enabled=AUTH_ENABLED)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not AUTH_ENABLED:
+        return redirect(url_for("index"))
+    if session.get("authed"):
+        return redirect(url_for("index"))
+
+    error = ""
+    if request.method == "POST":
+        password = (request.form.get("password") or "").strip()
+        if _safe_equal(password, SITE_PASSWORD):
+            session.clear()
+            session["authed"] = True
+            session.permanent = True
+            nxt = (request.form.get("next") or request.args.get("next") or "/").strip()
+            if not nxt.startswith("/") or nxt.startswith("//"):
+                nxt = "/"
+            logger.info("登录成功 | ip=%s", request.remote_addr or "?")
+            return redirect(nxt)
+        error = "密码错误"
+        logger.warning("登录失败 | ip=%s", request.remote_addr or "?")
+
+    nxt = (request.args.get("next") or "/").strip()
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/"
+    return render_template("login.html", error=error, next=nxt), (401 if error else 200)
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login") if AUTH_ENABLED else url_for("index"))
 
 
 # ===== API ===============================================================
@@ -288,8 +411,11 @@ def api_history():
         if p.name.startswith("."):
             continue
         st = p.stat()
+        title = read_song_title(p)
         songs.append({
-            "name": p.name,
+            "name": title or p.name,
+            "file": p.name,
+            "song_title": title or None,
             "url": make_output_url(BASE_URL, p.name),
             "size": st.st_size,
             "created": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
@@ -404,6 +530,9 @@ def api_delete_history(filename: str):
         return jsonify({"error": "仅允许删除 mp3/wav"}), 400
     try:
         path.unlink()
+        meta = path.with_suffix(path.suffix + ".meta.json")
+        if meta.is_file():
+            meta.unlink()
     except OSError as e:
         return jsonify({"error": str(e)}), 500
     logger.info("删除历史歌曲 | file=%s", name)
@@ -518,8 +647,9 @@ def api_generate_pipeline():
         return jsonify({"error": "流水线调用失败: " + str(e)}), 502
     result["scheme"] = "cloud"
     logger.info(
-        "流水线完成并返回客户端 | 来源=%s ip=%s 输出=%s 总耗时=%ss",
+        "流水线完成并返回客户端 | 来源=%s ip=%s 输出=%s 歌名=%s 总耗时=%ss",
         src_label, client_ip, result.get("output_url", "?"),
+        result.get("song_title", "?"),
         result.get("total_elapsed_sec", "?"),
     )
     return jsonify(result)
@@ -551,4 +681,10 @@ def _safe_name(filename: str) -> str:
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # 本地开发可用 debug；公网请用 gunicorn，勿开 debug
+    _debug = os.getenv("FLASK_DEBUG", "0").lower().strip() in ("1", "true", "yes")
+    if AUTH_ENABLED:
+        logger.info("简易鉴权已开启（Session 密码 + X-API-Key）")
+    else:
+        logger.warning("简易鉴权未开启：SITE_PASSWORD 为空（仅适合本地）")
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=_debug)

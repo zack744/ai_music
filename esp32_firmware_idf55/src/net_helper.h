@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 /* WiFi 连接状态回调（用于屏幕显示进度） */
 typedef void (*network_status_cb_t)(const char *msg);
 
@@ -7,21 +10,53 @@ typedef void (*network_status_cb_t)(const char *msg);
 extern "C" {
 #endif
 
-/* WiFiManager 配网(阻塞):首次启动开 AP "AI-Music-Setup",手机连上后配置
- * WiFi 密码 + 后端服务器 IP。配网成功后保存,后续自动连接。
- * status_cb: 配网过程中状态变化的回调(如"请连接热点配网"),可为 NULL。
+/* WiFiManager 配网(阻塞): AP "AI-Music-Setup"
+ * 可配置 WiFi + 后端 Host / Port / HTTPS。
  * 返回 true=已连上 WiFi。 */
 bool network_init(network_status_cb_t status_cb);
 
-/* 获取配网时输入的后端服务器 IP(如 "192.168.1.100") */
+/* 后端 host（域名或 IP）。兼容旧名 network_server_ip。 */
+const char *network_server_host(void);
 const char *network_server_ip(void);
 
-/* 运行时修改后端 IP 并持久化到 NVS（供屏幕设置页调用） */
+uint16_t network_server_port(void);
+bool network_server_tls(void);
+
+/* 运行时改配置并写 NVS */
+void network_set_server_host(const char *host);
+void network_set_server_port(uint16_t port);
+void network_set_server_tls(bool tls);
+void network_set_server(const char *host, uint16_t port, bool tls);
+
+/* 仅 IP 兼容入口：改 host，保留 port/tls */
 void network_set_server_ip(const char *ip);
 
-/* HTTP GET /api/history,返回 JSON 字符串(malloc 分配,调用者 free)。失败返回 NULL */
+/* 拼绝对 URL。path 以 / 开头。返回写入长度（不含 \\0），失败 0 */
+size_t network_make_url(char *out, size_t out_size, const char *path);
+
+/* 相对路径或绝对 URL → 可下载的绝对 URL */
+size_t network_resolve_url(char *out, size_t out_size, const char *url_or_path);
+
+/* 启动/设置页摘要，如 "https://api.ex.com:443" */
+size_t network_endpoint_summary(char *out, size_t out_size);
+
+/* HTTP(S) GET /api/history，JSON 字符串 malloc，调用者 free；失败 NULL */
 char *network_fetch_history(void);
+
+/* 清除已存 WiFi 账号（不改后端 Host/Port/TLS），然后重启。
+ * 重启后 autoConnect 会开 AP "AI-Music-Setup" 进入配网。 */
+void network_reset_wifi_and_reboot(void);
 
 #ifdef __cplusplus
 }
+
+#include <Client.h>
+
+/* C++：按当前 TLS 配置连接后端。调用方负责 stop。
+ * 返回堆上 Client*（WiFiClient 或 WiFiClientSecure），失败 NULL。 */
+Client *network_connect_backend(uint32_t timeout_ms = 15000);
+
+/* 写 Host 头到 client（已 connect） */
+void network_write_host_header(Client *client);
+
 #endif

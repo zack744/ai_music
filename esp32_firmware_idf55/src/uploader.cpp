@@ -1,10 +1,14 @@
 #include "uploader.h"
 #include "net_helper.h"
 #include <WiFi.h>
+#include <Client.h>
 #include <ArduinoJson.h>
 #include <stdio.h>
 
 static const char *TAG = "upload";
+
+/* 等生成完成：Fun-Music 可达 300s + 公网余量 */
+static const unsigned long UPLOAD_RESPONSE_TIMEOUT_MS = 360000UL;
 
 /* 计算 multipart body 总大小 */
 static size_t calc_multipart_size(const char *boundary,
@@ -59,11 +63,12 @@ static size_t calc_multipart_size(const char *boundary,
 bool uploader_upload(const uint8_t *env_wav, size_t env_size,
                      const uint8_t *speech_wav, size_t speech_size,
                      const char *user_text, int duration_sec,
-                     char *out_url, size_t out_url_size)
+                     char *out_url, size_t out_url_size,
+                     char *out_title, size_t out_title_size)
 {
-    const char *server_ip = network_server_ip();
-    if (!server_ip || !server_ip[0]) {
-        Serial.printf("[%s] no server IP\n", TAG);
+    const char *host = network_server_host();
+    if (!host || !host[0]) {
+        Serial.printf("[%s] no server host\n", TAG);
         return false;
     }
     if (!env_wav || env_size == 0) {
@@ -74,78 +79,82 @@ bool uploader_upload(const uint8_t *env_wav, size_t env_size,
     const char *boundary = "----ESP32AiMusicBoundary";
     size_t body_size = calc_multipart_size(boundary, env_size, speech_size, user_text, duration_sec);
 
-    Serial.printf("[%s] connecting %s:5000, body=%d bytes\n", TAG, server_ip, (int)body_size);
+    char endpoint[96];
+    network_endpoint_summary(endpoint, sizeof(endpoint));
+    Serial.printf("[%s] connecting %s, body=%d bytes, wait<=%lus\n",
+                  TAG, endpoint, (int)body_size, UPLOAD_RESPONSE_TIMEOUT_MS / 1000UL);
 
-    WiFiClient client;
-    client.setTimeout(60000);  /* Stream API timeout is milliseconds */
-    if (!client.connect(server_ip, 5000)) {
+    Client *client = network_connect_backend(60000);
+    if (!client) {
         Serial.printf("[%s] connect failed\n", TAG);
         return false;
     }
 
     /* 发 HTTP 头 */
-    client.printf("POST /api/generate/pipeline HTTP/1.1\r\n");
-    client.printf("Host: %s:5000\r\n", server_ip);
-    client.printf("Content-Type: multipart/form-data; boundary=%s\r\n", boundary);
-    client.printf("Content-Length: %d\r\n", (int)body_size);
-    client.printf("Connection: close\r\n\r\n");
+    client->print("POST /api/generate/pipeline HTTP/1.1\r\n");
+    network_write_host_header(client);
+    client->printf("Content-Type: multipart/form-data; boundary=%s\r\n", boundary);
+    client->printf("Content-Length: %d\r\n", (int)body_size);
+    client->print("Connection: close\r\n\r\n");
 
     /* env_audio */
-    client.printf("--%s\r\n", boundary);
-    client.printf("Content-Disposition: form-data; name=\"env_audio\"; filename=\"env.wav\"\r\n");
-    client.printf("Content-Type: audio/wav\r\n\r\n");
-    client.write(env_wav, env_size);
-    client.printf("\r\n");
+    client->printf("--%s\r\n", boundary);
+    client->print("Content-Disposition: form-data; name=\"env_audio\"; filename=\"env.wav\"\r\n");
+    client->print("Content-Type: audio/wav\r\n\r\n");
+    client->write(env_wav, env_size);
+    client->print("\r\n");
 
     /* speech_audio (optional) */
     if (speech_wav && speech_size > 0) {
-        client.printf("--%s\r\n", boundary);
-        client.printf("Content-Disposition: form-data; name=\"speech_audio\"; filename=\"speech.wav\"\r\n");
-        client.printf("Content-Type: audio/wav\r\n\r\n");
-        client.write(speech_wav, speech_size);
-        client.printf("\r\n");
+        client->printf("--%s\r\n", boundary);
+        client->print("Content-Disposition: form-data; name=\"speech_audio\"; filename=\"speech.wav\"\r\n");
+        client->print("Content-Type: audio/wav\r\n\r\n");
+        client->write(speech_wav, speech_size);
+        client->print("\r\n");
     }
 
     /* user_text (optional) */
     if (user_text && user_text[0]) {
-        client.printf("--%s\r\n", boundary);
-        client.printf("Content-Disposition: form-data; name=\"user_text\"\r\n\r\n");
-        client.print(user_text);
-        client.printf("\r\n");
+        client->printf("--%s\r\n", boundary);
+        client->print("Content-Disposition: form-data; name=\"user_text\"\r\n\r\n");
+        client->print(user_text);
+        client->print("\r\n");
     }
 
     /* duration_sec */
-    client.printf("--%s\r\n", boundary);
-    client.printf("Content-Disposition: form-data; name=\"duration_sec\"\r\n\r\n");
-    client.printf("%d\r\n", duration_sec);
+    client->printf("--%s\r\n", boundary);
+    client->print("Content-Disposition: form-data; name=\"duration_sec\"\r\n\r\n");
+    client->printf("%d\r\n", duration_sec);
 
     /* source */
-    client.printf("--%s\r\n", boundary);
-    client.printf("Content-Disposition: form-data; name=\"source\"\r\n\r\n");
-    client.printf("esp32\r\n");
+    client->printf("--%s\r\n", boundary);
+    client->print("Content-Disposition: form-data; name=\"source\"\r\n\r\n");
+    client->print("esp32\r\n");
 
     /* closing */
-    client.printf("--%s--\r\n", boundary);
+    client->printf("--%s--\r\n", boundary);
 
     Serial.printf("[%s] request sent, waiting response...\n", TAG);
 
     /* 读响应 */
     String response;
     const unsigned long started_at = millis();
-    while (client.connected() || client.available()) {
-        if ((unsigned long)(millis() - started_at) >= 120000UL) {
+    while (client->connected() || client->available()) {
+        if ((unsigned long)(millis() - started_at) >= UPLOAD_RESPONSE_TIMEOUT_MS) {
             Serial.printf("[%s] response timeout\n", TAG);
-            client.stop();
+            client->stop();
+            delete client;
             return false;
         }
-        while (client.available()) {
-            response += (char)client.read();
+        while (client->available()) {
+            response += (char)client->read();
         }
-        if (!client.available() && client.connected()) {
+        if (!client->available() && client->connected()) {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
-    client.stop();
+    client->stop();
+    delete client;
 
     /* 分离 header / body */
     int sep = response.indexOf("\r\n\r\n");
@@ -171,18 +180,32 @@ bool uploader_upload(const uint8_t *env_wav, size_t env_size,
         return false;
     }
 
-    strncpy(out_url, url, out_url_size - 1);
-    out_url[out_url_size - 1] = 0;
-
-    /* 如果返回的是相对路径, 拼上 server IP */
-    if (out_url[0] == '/') {
-        char full[300];
-        snprintf(full, sizeof(full), "http://%s:5000%s", server_ip, out_url);
-        strncpy(out_url, full, out_url_size - 1);
+    if (!network_resolve_url(out_url, out_url_size, url)) {
+        strncpy(out_url, url, out_url_size - 1);
         out_url[out_url_size - 1] = 0;
     }
 
-    Serial.printf("[%s] success, output_url=%s\n", TAG, out_url);
+    if (out_title && out_title_size > 0) {
+        out_title[0] = 0;
+        const char *title = doc["song_title"];
+        if (title && title[0]) {
+            size_t j = 0;
+            for (size_t i = 0; title[i] && j + 1 < out_title_size; i++) {
+                char c = title[i];
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == ' ') {
+                    out_title[j++] = c;
+                }
+            }
+            while (j > 0 && out_title[j - 1] == ' ') j--;
+            out_title[j] = 0;
+        }
+        if (!out_title[0]) {
+            strncpy(out_title, "New Song", out_title_size - 1);
+            out_title[out_title_size - 1] = 0;
+        }
+    }
+
+    Serial.printf("[%s] success, output_url=%s title=%s\n", TAG, out_url,
+                  (out_title && out_title[0]) ? out_title : "(none)");
     return true;
 }
-
