@@ -187,7 +187,7 @@
     </div>
 
     <form id="form-pipe" enctype="multipart/form-data">
-      <label>环境音（必填）-- 录制 / 上传 / 选内置素材</label>
+      <label>环境音（可选）-- 录制 / 上传 / 选内置素材，留空则跳过环境音理解</label>
       <div class="row">
         <button type="button" id="rec-env">● 录音</button>
         <input type="file" id="env-file" accept="audio/*">
@@ -205,7 +205,7 @@
 
       <label>生成时长 (秒)</label>
       <input type="number" id="pipe-duration" value="90" min="30" max="90" title="期望时长(秒)，API无硬控，靠短歌词间接控制，上限90">
-      <p><button type="submit" class="s2">运行流水线</button></p>
+      <p><button type="submit" class="s2">生成音乐</button></p>
     </form>
     <div id="pipe-result"></div>
     <pre id="out-pipe">（完整 JSON 在这里）</pre>
@@ -519,18 +519,17 @@ document.getElementById("form-pipe").addEventListener("submit", async (e) => {
   const out = document.getElementById("out-pipe");
   const player = document.getElementById("player-pipe");
   const result = document.getElementById("pipe-result");
-  out.textContent = "流水线运行中... mock 秒返；real 可能数秒~数分钟，请看上方日志";
+  out.textContent = "生成中... mock 秒返；real 可能数秒~数分钟，请看上方日志";
   player.innerHTML = "";
   result.innerHTML = "";
   loadLogs(true);
 
-  if (!envBlob) { alert("请先提供环境音（录制/上传/选素材）"); return; }
   const userText = document.getElementById("pipe-text").value.trim();
   if (!speechBlob && !userText) { alert("请提供语音或输入文字"); return; }
 
   const fd = new FormData();
   fd.append("duration_sec", document.getElementById("pipe-duration").value);
-  fd.append("env_audio", envBlob, "env_audio." + (envBlob.type.split("/")[1] || "webm"));
+  if (envBlob) fd.append("env_audio", envBlob, "env_audio." + (envBlob.type.split("/")[1] || "webm"));
   if (speechBlob) fd.append("speech_audio", speechBlob, "speech_audio." + (speechBlob.type.split("/")[1] || "webm"));
   if (userText) fd.append("user_text", userText);
 
@@ -546,10 +545,16 @@ document.getElementById("form-pipe").addEventListener("submit", async (e) => {
 
   const s = j.steps || {};
   let html = "";
-  if (s["1_audio_understanding"])
-    html += '<div class="step"><b>① 环境音理解</b> [' + escHtml(s["1_audio_understanding"].model || "") + '] '
-         + (s["1_audio_understanding"].elapsed_sec != null ? s["1_audio_understanding"].elapsed_sec + "s" : "")
-         + '<br>' + escHtml(s["1_audio_understanding"].scene) + '</div>';
+  if (s["1_audio_understanding"]) {
+    const u = s["1_audio_understanding"];
+    if (u.skipped) {
+      html += '<div class="step"><b>① 环境音理解</b> <span class="muted">已跳过（未提供环境音）</span></div>';
+    } else {
+      html += '<div class="step"><b>① 环境音理解</b> [' + escHtml(u.model || "") + '] '
+           + (u.elapsed_sec != null ? u.elapsed_sec + "s" : "")
+           + '<br>' + escHtml(u.scene) + '</div>';
+    }
+  }
   if (s["2_asr"])
     html += '<div class="step"><b>② 语音识别</b> [' + escHtml(s["2_asr"].source) + '/' + escHtml(s["2_asr"].model || "-") + ']<br>'
          + escHtml(s["2_asr"].text) + '</div>';

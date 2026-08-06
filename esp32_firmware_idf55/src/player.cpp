@@ -1,5 +1,6 @@
 #include "player.h"
 #include "config.h"
+#include "net_helper.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -161,6 +162,10 @@ bool player_play(const char *url, player_download_cb_t dl_cb)
         Serial.println("[play] http.begin failed");
         s_state = PLAYER_ERROR;
         return false;
+    }
+    const char *api_key = network_api_key();
+    if (api_key && api_key[0]) {
+        http.addHeader("X-API-Key", api_key);
     }
     int code = http.GET();
     if (code != 200) {

@@ -93,6 +93,7 @@ bool uploader_upload(const uint8_t *env_wav, size_t env_size,
     /* 发 HTTP 头 */
     client->print("POST /api/generate/pipeline HTTP/1.1\r\n");
     network_write_host_header(client);
+    network_write_auth_header(client);
     client->printf("Content-Type: multipart/form-data; boundary=%s\r\n", boundary);
     client->printf("Content-Length: %d\r\n", (int)body_size);
     client->print("Connection: close\r\n\r\n");

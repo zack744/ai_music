@@ -612,8 +612,7 @@ def api_generate_pipeline():
         p = SAMPLES_DIR / (env_sample + ".mp3")
         if p.exists():
             env_path = p
-    if env_path is None:
-        return jsonify({"error": "环境音不能为空（上传文件或选择内置素材）"}), 400
+    # 环境音可选：未上传且未选内置素材时 env_path 保持 None，流水线自动跳过理解步骤
 
     # 解析"想说的话"：语音优先，没有语音则必须给文字
     speech_path = None
@@ -628,10 +627,13 @@ def api_generate_pipeline():
     client_ip = request.remote_addr or "?"
     src_label = "ESP32" if is_esp32 else "浏览器"
     try:
+        env_info = (
+            f"{env_path.name}({env_path.stat().st_size}B)"
+            if env_path and env_path.exists() else None
+        )
         logger.info(
-            "收到生成请求 | 来源=%s ip=%s 环境音=%s(%s) 语音=%s 文字=%s 时长=%ss",
-            src_label, client_ip, env_path.name,
-            f"{env_path.stat().st_size}B" if env_path.exists() else "?",
+            "收到生成请求 | 来源=%s ip=%s 环境音=%s 语音=%s 文字=%s 时长=%ss",
+            src_label, client_ip, env_info,
             (f"{speech_path.name}({speech_path.stat().st_size}B)"
              if speech_path and speech_path.exists() else None),
             user_text[:50] if user_text else None, duration,
@@ -639,7 +641,7 @@ def api_generate_pipeline():
         if is_esp32:
             logger.info(
                 "ESP32 已上传文件 | env=%s speech=%s",
-                env_path.name, speech_path.name if speech_path else "(无)",
+                env_path.name if env_path else "(无)", speech_path.name if speech_path else "(无)",
             )
         result = pipeline.run(env_path, speech_path, user_text or None, duration)
     except Exception as e:

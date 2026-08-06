@@ -1,4 +1,5 @@
 #include "net_helper.h"
+#include "config.h"
 #include <WiFiManager.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -8,8 +9,9 @@
 #include <stdlib.h>
 
 static String g_server_host;
-static uint16_t g_server_port = 5000;
-static bool g_server_tls = false;
+static uint16_t g_server_port = AI_MUSIC_DEFAULT_PORT;
+static bool g_server_tls = (AI_MUSIC_DEFAULT_TLS != 0);
+static String g_api_key;
 static bool g_portal_used = false;
 
 static void load_prefs(void)
@@ -22,11 +24,26 @@ static void load_prefs(void)
         g_server_host = prefs.getString("server_ip", "");
     }
     g_server_port = (uint16_t)prefs.getUShort("server_port", 0);
-    if (g_server_port == 0) {
-        g_server_port = 5000;
-    }
     g_server_tls = prefs.getBool("server_tls", false);
+    g_api_key = prefs.getString("api_key", "");
+    bool has_port = prefs.isKey("server_port");
+    bool has_tls = prefs.isKey("server_tls");
+    bool has_key = prefs.isKey("api_key");
     prefs.end();
+
+    /* NVS 从未写过时用编译期公网演示默认值 */
+    if (g_server_host.length() == 0) {
+        g_server_host = AI_MUSIC_DEFAULT_HOST;
+    }
+    if (!has_port || g_server_port == 0) {
+        g_server_port = (uint16_t)AI_MUSIC_DEFAULT_PORT;
+    }
+    if (!has_tls) {
+        g_server_tls = (AI_MUSIC_DEFAULT_TLS != 0);
+    }
+    if (!has_key && g_api_key.length() == 0) {
+        g_api_key = AI_MUSIC_DEFAULT_API_KEY;
+    }
 }
 
 static void save_prefs(void)
@@ -37,6 +54,7 @@ static void save_prefs(void)
     prefs.putString("server_ip", g_server_host); /* 兼容旧字段 */
     prefs.putUShort("server_port", g_server_port);
     prefs.putBool("server_tls", g_server_tls);
+    prefs.putString("api_key", g_api_key);
     prefs.end();
 }
 
@@ -72,17 +90,20 @@ bool network_init(network_status_cb_t status_cb)
     WiFiManager wm;
     wm.setConfigPortalTimeout(300);
 
-    String host_def = (g_server_host.length() > 0) ? g_server_host : "192.168.1.100";
+    String host_def = (g_server_host.length() > 0) ? g_server_host : AI_MUSIC_DEFAULT_HOST;
     char port_def[8];
     snprintf(port_def, sizeof(port_def), "%u", (unsigned)g_server_port);
     const char *tls_def = g_server_tls ? "1" : "0";
+    String key_def = g_api_key;
 
     WiFiManagerParameter p_host("server_host", "Backend Host (IP or domain)", host_def.c_str(), 64);
-    WiFiManagerParameter p_port("server_port", "Backend Port (5000 or 443)", port_def, 6);
+    WiFiManagerParameter p_port("server_port", "Backend Port (8080/5000/443)", port_def, 6);
     WiFiManagerParameter p_tls("server_tls", "HTTPS 1=on 0=off", tls_def, 2);
+    WiFiManagerParameter p_key("api_key", "X-API-Key (same as server password)", key_def.c_str(), 64);
     wm.addParameter(&p_host);
     wm.addParameter(&p_port);
     wm.addParameter(&p_tls);
+    wm.addParameter(&p_key);
 
     g_portal_used = false;
     if (status_cb) {
@@ -107,9 +128,11 @@ bool network_init(network_status_cb_t status_cb)
         String new_host = p_host.getValue();
         String new_port = p_port.getValue();
         String new_tls = p_tls.getValue();
+        String new_key = p_key.getValue();
         new_host.trim();
         new_port.trim();
         new_tls.trim();
+        new_key.trim();
         bool changed = false;
         if (new_host.length() > 0) {
             normalize_host(new_host);
@@ -135,11 +158,16 @@ bool network_init(network_status_cb_t status_cb)
                 changed = true;
             }
         }
+        if (new_key != g_api_key) {
+            g_api_key = new_key;
+            changed = true;
+        }
         if (changed || g_server_host.length() > 0) {
             save_prefs();
-            Serial.printf("[net] server saved from portal: %s://%s:%u\n",
+            Serial.printf("[net] server saved from portal: %s://%s:%u key=%s\n",
                           g_server_tls ? "https" : "http",
-                          g_server_host.c_str(), (unsigned)g_server_port);
+                          g_server_host.c_str(), (unsigned)g_server_port,
+                          g_api_key.length() > 0 ? "set" : "empty");
         }
     }
 
@@ -169,6 +197,19 @@ uint16_t network_server_port(void)
 bool network_server_tls(void)
 {
     return g_server_tls;
+}
+
+const char *network_api_key(void)
+{
+    return g_api_key.c_str();
+}
+
+void network_set_api_key(const char *key)
+{
+    g_api_key = key ? key : "";
+    g_api_key.trim();
+    save_prefs();
+    Serial.printf("[net] api_key updated: %s\n", g_api_key.length() > 0 ? "set" : "empty");
 }
 
 void network_set_server_host(const char *host)
@@ -313,6 +354,12 @@ void network_write_host_header(Client *client)
     client->printf("Host: %s:%u\r\n", g_server_host.c_str(), (unsigned)g_server_port);
 }
 
+void network_write_auth_header(Client *client)
+{
+    if (!client || g_api_key.length() == 0) return;
+    client->printf("X-API-Key: %s\r\n", g_api_key.c_str());
+}
+
 void network_reset_wifi_and_reboot(void)
 {
     Serial.println("[net] clearing WiFi credentials, reboot to portal...");
@@ -338,6 +385,7 @@ char *network_fetch_history(void)
 
     client->print("GET /api/history HTTP/1.1\r\n");
     network_write_host_header(client);
+    network_write_auth_header(client);
     client->print("Connection: close\r\n\r\n");
 
     String response;

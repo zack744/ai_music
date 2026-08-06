@@ -71,7 +71,7 @@ class CloudPipeline:
 
     def run(
         self,
-        env_audio_path: Path,
+        env_audio_path: Optional[Path] = None,
         speech_audio_path: Optional[Path] = None,
         user_text: Optional[str] = None,
         duration_sec: int = 90,
@@ -79,17 +79,28 @@ class CloudPipeline:
         steps = {}
         pipeline_start = time.time()
 
-        # 第一步：理解环境音
-        logger.info("[1/4] 环境音理解 | model=%s input=%s", self.ds.audio_model, env_audio_path.name)
-        t0 = time.time()
-        scene = self.ds.understand_audio(env_audio_path)
-        elapsed_1 = time.time() - t0
-        logger.info("[1/4] 完成 | 耗时=%.2fs | 输出=%s", elapsed_1, _truncate(scene, 120))
-        steps["1_audio_understanding"] = {
-            "scene": scene,
-            "model": self.ds.audio_model,
-            "elapsed_sec": round(elapsed_1, 2),
-        }
+        # 第一步：理解环境音（可选，无环境音则跳过）
+        if env_audio_path is not None:
+            logger.info("[1/4] 环境音理解 | model=%s input=%s", self.ds.audio_model, env_audio_path.name)
+            t0 = time.time()
+            scene = self.ds.understand_audio(env_audio_path)
+            elapsed_1 = time.time() - t0
+            logger.info("[1/4] 完成 | 耗时=%.2fs | 输出=%s", elapsed_1, _truncate(scene, 120))
+            steps["1_audio_understanding"] = {
+                "scene": scene,
+                "model": self.ds.audio_model,
+                "elapsed_sec": round(elapsed_1, 2),
+            }
+        else:
+            scene = ""
+            elapsed_1 = 0
+            logger.info("[1/4] 跳过环境音理解 | 无环境音输入")
+            steps["1_audio_understanding"] = {
+                "scene": "",
+                "model": None,
+                "elapsed_sec": 0,
+                "skipped": True,
+            }
 
         # 第二步：语音识别（有语音文件才做，否则直接用文字，降低复杂度）
         if speech_audio_path is not None:

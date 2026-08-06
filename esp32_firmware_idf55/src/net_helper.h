@@ -22,6 +22,10 @@ const char *network_server_ip(void);
 uint16_t network_server_port(void);
 bool network_server_tls(void);
 
+/* 公网鉴权：与后端 API_ACCESS_KEY / SITE_PASSWORD 一致；空=不发头 */
+const char *network_api_key(void);
+void network_set_api_key(const char *key);
+
 /* 运行时改配置并写 NVS */
 void network_set_server_host(const char *host);
 void network_set_server_port(uint16_t port);
@@ -58,5 +62,8 @@ Client *network_connect_backend(uint32_t timeout_ms = 15000);
 
 /* 写 Host 头到 client（已 connect） */
 void network_write_host_header(Client *client);
+
+/* 写 X-API-Key（api_key 非空时） */
+void network_write_auth_header(Client *client);
 
 #endif

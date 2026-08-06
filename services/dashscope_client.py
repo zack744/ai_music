@@ -22,9 +22,15 @@
 """
 import json
 import logging
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger("dashscope")
+
+_ASR_MAX_SEC = 280
+_ASR_CHUNK_SEC = 150
 
 
 # 给全模态模型的提问模板：输出结构化的场景/情绪/节奏描述
@@ -126,34 +132,66 @@ class DashScopeClient:
         return self._real_transcribe(audio_path)
 
     def _real_transcribe(self, audio_path: Path) -> str:
-        # qwen3-asr-flash 走 MultiModalConversation 接口，10小时免费
-        # （paraformer-realtime-v2 无免费额度，已被替换）
+        # qwen3-asr-flash 单次限制 ≤10MB 且 ≤5分钟；超长音频按固定时长切片
+        # 分别识别后拼接，规避 "The audio is too long"
+        logger.info("DashScope ASR | model=%s file=%s", self.asr_model, audio_path.name)
+        dur = _probe_duration(audio_path)
+        if 0 < dur <= _ASR_MAX_SEC:
+            logger.info("ASR 时长=%.1fs <= %ds，单次识别", dur, _ASR_MAX_SEC)
+            return self._asr_once(audio_path)
+        if dur > _ASR_MAX_SEC:
+            logger.info("ASR 音频较长(%.1fs)，切片识别 chunk=%ds", dur, _ASR_CHUNK_SEC)
+            return self._asr_chunked(audio_path)
+        logger.warning("ASR 无法探测时长，尝试单次识别 | file=%s", audio_path.name)
+        return self._asr_once(audio_path)
+
+    def _asr_once(self, audio_path: Path) -> str:
         import dashscope
         from dashscope import MultiModalConversation
 
         dashscope.api_key = self.api_key
-        logger.info("DashScope ASR | model=%s file=%s", self.asr_model, audio_path.name)
         messages = [{
             "role": "user",
             "content": [
                 {"audio": str(audio_path)},
-                {"text": ""},  # 留空文本，让模型只做转写
+                {"text": ""},
             ],
         }]
         resp = MultiModalConversation.call(
             model=self.asr_model,
             messages=messages,
             result_format="message",
-            asr_options={"enable_itn": False},  # 关闭 ITN，保留原始口语
+            asr_options={"enable_itn": False},
         )
         if resp.status_code != 200:
             logger.error("DashScope ASR 失败 | code=%s msg=%s", resp.code, resp.message)
-            raise RuntimeError(
-                f"ASR 失败: {resp.code} {resp.message}"
-            )
+            raise RuntimeError(f"ASR 失败: {resp.code} {resp.message}")
         result = _extract_multimodal_text(resp, tag="Qwen-ASR")
-        logger.info("DashScope ASR 完成 | output_len=%d text=%s", len(result), result[:80])
+        logger.info("DashScope ASR 完成 | file=%s output_len=%d text=%s",
+                     audio_path.name, len(result), result[:80])
         return result
+
+    def _asr_chunked(self, audio_path: Path) -> str:
+        chunks, tmpdir = _split_audio(audio_path, _ASR_CHUNK_SEC)
+        try:
+            texts = []
+            last_err = None
+            for i, c in enumerate(chunks, 1):
+                cdur = _probe_duration(c)
+                if 0 < cdur < 1.0:
+                    logger.info("ASR 分片 %d/%d | %s 过短(%.1fs)，跳过", i, len(chunks), c.name, cdur)
+                    continue
+                logger.info("ASR 分片 %d/%d | %s (%.1fs)", i, len(chunks), c.name, cdur if cdur > 0 else -1)
+                try:
+                    texts.append(self._asr_once(c))
+                except RuntimeError as e:
+                    last_err = e
+                    logger.warning("ASR 分片 %d/%d 失败，跳过 | %s", i, len(chunks), e)
+            if not texts and last_err is not None:
+                raise last_err
+            return "".join(texts)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ---- 第三步：歌词 + 音乐风格 -----------------------------------------
     def generate_lyrics_and_style(self, scene_desc: str, user_text: str) -> dict:
@@ -217,6 +255,35 @@ def _extract_multimodal_text(resp, tag: str = "") -> str:
     if isinstance(content, list):
         return "".join(c.get("text", "") for c in content if isinstance(c, dict))
     return str(content)
+
+
+def _probe_duration(audio_path: Path) -> float:
+    """用 ffprobe 取音频时长(秒)；失败返 -1。"""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+            stderr=subprocess.STDOUT, timeout=30,
+        ).decode().strip()
+        return float(out)
+    except Exception as e:
+        logger.warning("ffprobe 探测时长失败 | file=%s err=%s", audio_path.name, e)
+        return -1.0
+
+
+def _split_audio(audio_path: Path, chunk_sec: int):
+    """用 ffmpeg 按固定时长切片，返回 (分片列表, 临时目录)。"""
+    tmpdir = Path(tempfile.mkdtemp(prefix="asr_chunk_"))
+    pattern = str(tmpdir / "chunk_%03d.mp3")
+    subprocess.check_call(
+        ["ffmpeg", "-y", "-i", str(audio_path),
+         "-f", "segment", "-segment_time", str(chunk_sec),
+         "-c:a", "libmp3lame", "-b:a", "64k", "-ar", "16000", "-ac", "1",
+         pattern],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600,
+    )
+    chunks = sorted(tmpdir.glob("chunk_*.mp3"))
+    return chunks, tmpdir
 
 
 def _parse_json_loose(text: str) -> dict:

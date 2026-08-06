@@ -20,6 +20,21 @@
 #define I2S_PLAY_LRC      GPIO_NUM_5
 #define I2S_PLAY_DIN      GPIO_NUM_6
 
+/* 公网演示默认后端（NVS 为空时使用；配网页可覆盖） */
+#ifndef AI_MUSIC_DEFAULT_HOST
+#define AI_MUSIC_DEFAULT_HOST "192.168.1.100"
+#endif
+#ifndef AI_MUSIC_DEFAULT_PORT
+#define AI_MUSIC_DEFAULT_PORT 5000
+#endif
+#ifndef AI_MUSIC_DEFAULT_TLS
+#define AI_MUSIC_DEFAULT_TLS 0
+#endif
+/* 与云端 SITE_PASSWORD / API_ACCESS_KEY 一致；空=不发 X-API-Key */
+#ifndef AI_MUSIC_DEFAULT_API_KEY
+#define AI_MUSIC_DEFAULT_API_KEY ""
+#endif
+
 /* 临时/现场播放器自检；正式固件保持 0，需要时改成 1。 */
 #define PLAYER_BOOT_SELF_TEST 0
 #define PLAYER_BOOT_SELF_TEST_STREAM 0
