@@ -4,6 +4,12 @@
 
 **Cloud music pipeline** (env audio + speech/text → generated track) with an **ESP32-S3** client for record/upload and full-file download playback.
 
+<p align="center">
+  <img src="docs/demo/musicbox_demo.jpg" alt="户外环境音录制" width="360"/>
+</p>
+
+> 🎬 户外环境音录制 demo：[musicbox_demo.mp4](docs/demo/musicbox_demo.mp4)
+
 ```
 [ESP32-S3 录音/上传]              [浏览器 Web 控制台]
         │  HTTP                        │
