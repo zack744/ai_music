@@ -30,6 +30,12 @@
 
 `audio_samples/` 里放了 5 段可用的环境音（鸟鸣 / 森林 / 溪流 / 海风等），直接上传即可试跑流水线。
 
+## ESP32 界面
+
+| 主菜单 | 录音 | 生成中 | 播放 | 历史 |
+|---|---|---|---|---|
+| <img src="docs/demo/ui/ui_menu.png" width="120"/> | <img src="docs/demo/ui/ui_recording.png" width="120"/> | <img src="docs/demo/ui/ui_generating.png" width="120"/> | <img src="docs/demo/ui/ui_playing.png" width="120"/> | <img src="docs/demo/ui/ui_history.png" width="120"/> |
+
 ## 流水线 / Pipeline
 
 1. **采集** Capture：浏览器或 ESP32 录环境音 + 语音（或打字）
