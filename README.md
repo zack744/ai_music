@@ -1,5 +1,12 @@
 # 🎵 ai_music · 有趣的魔法音乐盒
 
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white" />
+  <img alt="Flask" src="https://img.shields.io/badge/Flask-Cloud%20Pipeline-000000?style=for-the-badge&logo=flask&logoColor=white" />
+  <img alt="ESP32-S3" src="https://img.shields.io/badge/ESP32--S3-Hardware-E7352C?style=for-the-badge&logo=espressif&logoColor=white" />
+  <img alt="MIT" src="https://img.shields.io/badge/License-MIT-00E38B?style=for-the-badge" />
+</p>
+
 一个会"听"的魔法音乐盒：录下一段环境音、说一句话，它就能变出一首属于你的歌。
 
 **Cloud music pipeline** (env audio + speech/text → generated track) with an **ESP32-S3** client for record/upload and full-file download playback.
@@ -9,6 +16,15 @@
 </p>
 
 > 🎬 户外环境音录制 demo：[musicbox_demo.mp4](docs/demo/musicbox_demo.mp4)
+
+## ✨ 特性
+
+- 🎙️ **多模态输入**：环境音 / 语音 / 文字，三种方式自由组合
+- 🧠 **智能创作链路**：环境理解 → ASR → 歌词风格 → 音乐生成，全自动
+- 🔄 **多引擎热切换**：Fun-Music / MiniMax / Mock，无需重启
+- 📱 **ESP32 硬件终端**：触摸屏、录音、整首下载播放，软硬件一体
+- 🌐 **Web 控制台**：日志监控 / 历史歌曲 / 录音上传 / 后端热切换
+- 🔒 **安全**：API Key 本地保存，公网简易鉴权
 
 ```
 [ESP32-S3 录音/上传]              [浏览器 Web 控制台]
