@@ -52,7 +52,7 @@
 
 | 主菜单 | 录音 | 生成中 | 播放 | 历史 |
 |---|---|---|---|---|
-| <img src="docs/demo/ui/ui_menu.png" width="120"/> | <img src="docs/demo/ui/ui_recording.png" width="120"/> | <img src="docs/demo/ui/ui_generating.png" width="120"/> | <img src="docs/demo/ui/ui_playi...]
+| ![ui_menu](docs/demo/ui/ui_menu.png) | ![ui_recording](docs/demo/ui/ui_recording.png) | ![ui_generating](docs/demo/ui/ui_generating.png) | ![ui_playing](docs/demo/ui/ui_playing.png) | ![ui_history](docs/demo/ui/ui_history.png) |
 
 ## 流水线 / Pipeline
 
@@ -75,7 +75,7 @@ python app.py   # http://localhost:5000
 
 - Real 云端：`.env` 中 `PIPELINE_MODE=real`、`PIPELINE_MUSIC_MODE=real`，并配置 API Key  
 - ESP32 下载成片：局域网设 `BASE_URL=http://<本机IP>:5000`；公网设 `BASE_URL=https://你的域名` 或 `http://公网IP:端口`（须与固件 Host/Port/HTTPS 一致）  
-- **简易鉴权（公网推荐）**：设 `SITE_PASSWORD`；浏览器登录；设备请求头 `X-API-Key`（默认与密码相同，可用 `API_ACCESS_KEY` 单独设）。留空则关闭鉴权。[...]
+- **简易鉴权（公网推荐）**：设 `SITE_PASSWORD`；浏览器登录；设备请求头 `X-API-Key`（默认与密码相同，可用 `API_ACCESS_KEY` 单独设）。留空则关闭鉴权。
 - 生产（Linux）：`gunicorn -b 127.0.0.1:5000 -w 1 --timeout 360 "app:app"`，前面用 Nginx 反代（超时 ≥360s，body ≥40m）  
 - **切勿提交 `.env`**（已在 `.gitignore`）
 
